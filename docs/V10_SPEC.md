@@ -1,11 +1,11 @@
 # Gold Regime Scalper v10 — Specification
 
-**Status:** design draft. No code yet. Defaults marked ⚠ are waiting for confirmation (see §10).
+**Status:** Round 1 of 3 delivered: `Gold_Regime_Scalper_v10.00.mq5`, build R1, observe only, no order code. All defaults confirmed (see §10).
 
 | | |
 |---|---|
-| Planned EA file | `Gold_Regime_Scalper_v10.00.mq5` |
-| Symbol / chart | XAUUSD ⚠, attached to M1 |
+| EA file | `Gold_Regime_Scalper_v10.00.mq5` |
+| Symbol / chart | XAUUSD, attached to M1 |
 | Account | Pepperstone, hedging, GBP |
 | Magic numbers | 100001 Trend Pullback · 100002 Trend Breakout · 100003 Range Fade |
 | Log prefix | `[V10]` |
@@ -69,6 +69,16 @@ The state is re-evaluated on each new M1 bar. The safety overrides in step 1 are
 
 New entries are allowed only in TREND_UP, TREND_DOWN and RANGE. In every other state, v10 still manages open trades but opens no new ones.
 
+**WARMUP** is an extra internal state, used until enough M1/M5 history has loaded. It is a no-trade state.
+
+**State-switching rules** (as built in R1):
+- VOLATILE and DEAD take effect immediately.
+- Bars that close while the VOLATILE latch is active never count toward confirming a state. When the latch ends, the state becomes UNCLEAR, so every trade state has to be confirmed again.
+- A trade state that is contradicted by a different trade state (for example TREND_UP against TREND_DOWN or RANGE) drops to UNCLEAR at once. The new state still needs confirmation.
+- Moving into a trade state needs `InpConfirmBars` consecutive bars. So does dropping from a trade state to UNCLEAR, which means a single weak bar does not end a trend.
+- Moving between two no-trade states (for example DEAD to UNCLEAR) happens immediately.
+- On start-up, the previous closed bars are replayed, so a restart doesn't have to wait `InpConfirmBars` minutes.
+
 ## 5. Playbooks
 
 | Playbook | Trades in | Entry trigger (live ticks) | Stop | Target |
@@ -112,8 +122,8 @@ At most one entry is opened per tick.
 ### 8.2 Position size
 | Input | Default | Meaning |
 |---|---|---|
-| InpLotMode | FIXED ⚠ | FIXED, or RISK (lot size from % of equity) |
-| InpFixedLots | 0.01 ⚠ | |
+| InpLotMode | FIXED | FIXED, or RISK (lot size from % of equity) |
+| InpFixedLots | 0.01 | |
 | InpRiskPct | 0.20 | RISK mode only; replaces InpMaxLossPerTrade |
 | InpMaxLots | 0.05 | Safety cap per trade |
 
@@ -166,7 +176,7 @@ At most one entry is opened per tick.
 | InpTpATR / InpSlATR | 0.80 / 1.00 | Target and stop distance |
 | InpMinSlPts | 60 | The stop is never tighter than this |
 | InpMinNetTP / InpMaxNetTP | 0.30 / 1.50 | Skip if the target would net under £0.30; cap the target at £1.50 net |
-| InpMaxLossPerTrade | 2.00 ⚠ | Hard £ cap; the trade is skipped if the stop doesn't fit under it |
+| InpMaxLossPerTrade | 2.00 | Hard £ cap; the trade is skipped if the stop doesn't fit under it |
 | InpMinRR | 0.60 | Minimum net reward ÷ net risk; filters out trades dominated by costs |
 
 ### 8.8 Exit management
@@ -182,7 +192,7 @@ At most one entry is opened per tick.
 ### 8.9 Aggression and pacing
 | Input | Default | Meaning |
 |---|---|---|
-| InpMaxPositions / InpMaxPerDirection | 4 / 3 ⚠ | |
+| InpMaxPositions / InpMaxPerDirection | 4 / 3 | |
 | InpStackNeedsBE | true | Add trades only when the existing ones are locked at breakeven |
 | InpMinSpacingPts | 40 | Minimum gap between stacked entries |
 | InpCooldownWinSec / LossSec | 3 / 45 | Re-entry delay after a win / after a loss |
@@ -192,10 +202,10 @@ At most one entry is opened per tick.
 ### 8.10 Capital protection
 | Input | Default | Meaning |
 |---|---|---|
-| InpMaxOpenRisk | 6.00 ⚠ | £ total risk of all open stops. Trades locked at breakeven count as zero |
+| InpMaxOpenRisk | 6.00 | £ total risk of all open stops. Trades locked at breakeven count as zero |
 | InpStreakPause / PauseMin | 3 / 10 | 3 losses in a row → 10-minute pause |
 | InpStreakHalt | 7 | 7 losses in a row → stop for the day |
-| InpDailyLossLimit | 30.00 ⚠ | £, closed + floating. Close everything and stop for the day |
+| InpDailyLossLimit | 30.00 | £, closed + floating. Close everything and stop for the day |
 | InpDailyProfitLock | 0 | £, 0 = off. Above this, no new entries today |
 | InpEquityKillPct | 8.0 | Equity 8% below its peak → stop until manually reset |
 | InpGuardTrades / MinAvg / PauseMin | 12 / 0.00 / 30 | If a playbook's last 12 trades average below £0, pause it for 30 minutes |
@@ -235,9 +245,23 @@ Limits of the Strategy Tester:
 - The economic calendar isn't available, so the news filter is skipped in backtests.
 - Real latency and slippage aren't reproduced, so a demo forward test is required before going live.
 
-## 10. Open decisions (⚠)
+## 10. Decisions (confirmed: user replied "go")
 
 1. £ limits: £2.00 max loss per trade, £6.00 total open risk, £30 daily loss limit.
 2. Lot size: fixed 0.01, up to 3 stacked trades per direction (0.03 maximum).
 3. Symbol: XAUUSD.
-4. Location: this branch (`feat/v10-regime-scalper` in `matanostoamr/v7`), or a separate repo.
+4. Location: branch `feat/v10-regime-scalper` in `matanostoamr/v7`, draft PR #2.
+
+## 11. Round 1 (build R1): what is in the file
+
+| Part | Status |
+|---|---|
+| All inputs (§8), validated in OnInit | ✅ Group names show which round makes each input active |
+| MarketData: tick ring buffer, sliding windows (O(1) high/low), 5-minute spread median | ✅ |
+| StateEngine: all states, confirmation rules, VOLATILE latch (ATR ratio, shock, spread spike) | ✅ |
+| Trade-plan preview: stop and target in £ for the current ATR, checked against the £ caps | ✅ Shows FITS or SKIP with the reason |
+| Entry readiness preview: state, session, spread, stale quotes, plan | ✅ What the Round 2 gate will start from |
+| Dashboard, chart marks (TU/TD/RG/UN/DE/VO), Experts-log lines `[V10] STATE ...`, daily `[V10] DAY ...` summary | ✅ |
+| Orders, playbooks, gatekeeper (news, limits), position manager, ledger, CSV | ⏳ Rounds 2 and 3 |
+
+R1 never sends, modifies or closes orders, even when `InpMode = TRADE`.
