@@ -1,6 +1,6 @@
 # Gold Regime Scalper v10 — Specification
 
-**Status:** Round 1 of 3 delivered: `Gold_Regime_Scalper_v10.00.mq5`, build R1, observe only, no order code. All defaults confirmed (see §10).
+**Status:** Round 2 of 3 delivered: `Gold_Regime_Scalper_v10.00.mq5`, build R2. **It trades**: three playbooks with server-side stop and target, full entry protection, forced flatten. The exit management in §6 (breakeven lock, runner, time stop, state exit), persistence and the CSV log arrive in Round 3. See §12.
 
 | | |
 |---|---|
@@ -100,14 +100,15 @@ At most one entry is opened per tick.
 
 ## 7. Hard rules (built in, not inputs)
 
-1. Every position has a server-side stop. If the broker rejects the stop on the order, it is attached immediately afterwards. If that fails too, the position is closed.
+1. Every position has a server-side stop. If the broker rejects the stop on the order (twice, with fresh prices), the order is sent without it and the stop is attached at once. If that also fails, the position is closed within 10 s (`NO_STOP_*` close reasons). After the first such close, entries pause for 30 minutes; after the second, v10 stops for the day.
 2. Stops only move in the trade's favour.
-3. No martingale, no averaging down, no hedge recovery. Extra positions are opened only when the existing ones are locked at breakeven or better.
+3. No martingale, no averaging down, no hedge recovery. Extra positions are opened only when the existing ones are locked at breakeven or better. No entry against an open position of the other direction unless that position is locked (no self-hedging).
 4. Exits are processed before entries on every tick.
 5. Every loss counts toward the daily limit and the loss streak, including forced closes.
-6. Protections survive a restart. State is saved in GlobalVariables, and today's P&L is rebuilt from deal history.
-7. v10 refuses to run on a netting account, because stacking requires hedging.
+6. Protections survive a restart. State is saved in GlobalVariables, and today's P&L is rebuilt from deal history. (Build R2 already rebuilds today's P&L and trade counts from history; saving streaks, pauses and peak equity arrives in Round 3.)
+7. v10 refuses to run in TRADE mode on a netting account, because stacking requires hedging.
 8. Indicator values come from closed bars only, so nothing repaints. Only the entry triggers use live ticks.
+9. On a real-money account outside the Strategy Tester, v10 sends no orders unless `InpAllowRealAccount = true`. It shows states and signals instead.
 
 ## 8. Input parameters
 
@@ -118,6 +119,7 @@ At most one entry is opened per tick.
 | InpMagicBase | 100000 | +1 Pullback, +2 Breakout, +3 Fade |
 | InpComment | "V10" | Order comment |
 | InpLogLevel | 1 | 0 errors only, 1 trades, 2 debug |
+| InpAllowRealAccount | false | Safety lock: TRADE mode on a real-money account needs `true`. Demo accounts and the Strategy Tester are not affected |
 
 ### 8.2 Position size
 | Input | Default | Meaning |
@@ -210,7 +212,7 @@ At most one entry is opened per tick.
 | InpEquityKillPct | 8.0 | Equity 8% below its peak → stop until manually reset |
 | InpGuardTrades / MinAvg / PauseMin | 12 / 0.00 / 30 | If a playbook's last 12 trades average below £0, pause it for 30 minutes |
 | InpMaxAvgSlipPts | 25 | Average slippage of the last 10 fills above this → 15-minute pause |
-| InpMinMarginLevel | 500 | % |
+| InpMinMarginLevel | 200 | %, margin level after the new entry. Lowered from 500: gold margin at UK retail is about 5%, so 0.01 lot needs about £150 at $4,000 gold, and 500% would allow only one trade on £1,000. The £ stops are the real risk limit |
 
 ### 8.11 Sessions and news (server time)
 | Input | Default | Meaning |
@@ -252,7 +254,7 @@ Limits of the Strategy Tester:
 3. Symbol: XAUUSD.
 4. Location: branch `feat/v10-regime-scalper` in `matanostoamr/v7`, draft PR #2.
 
-## 11. Round 1 (build R1): what is in the file
+## 11. Round 1 (build R1)
 
 | Part | Status |
 |---|---|
@@ -264,4 +266,30 @@ Limits of the Strategy Tester:
 | Dashboard, chart marks (TU/TD/RG/UN/DE/VO), Experts-log lines `[V10] STATE ...`, daily `[V10] DAY ...` summary | ✅ |
 | Orders, playbooks, gatekeeper (news, limits), position manager, ledger, CSV | ⏳ Rounds 2 and 3 |
 
-R1 never sends, modifies or closes orders, even when `InpMode = TRADE`.
+R1 never sent, modified or closed orders, even when `InpMode = TRADE`.
+
+## 12. Round 2 (build R2): what is in the file
+
+| Part | Status |
+|---|---|
+| Playbooks: Trend Pullback, Trend Breakout, Range Fade, evaluated on every new tick, at most one entry per tick | ✅ |
+| Risk check per signal: £ cap per trade, minimum net target, minimum RR, open-risk cap, margin, broker stops level | ✅ |
+| Executor: market orders with SL and TP attached, filling-mode fallback (FOK → IOC → RETURN), requote retries, back-off after failures, rate limit | ✅ |
+| Stop guard: any v10 position without a stop gets one at once, or is closed (rule 1) | ✅ |
+| Gates: session, Monday delay, Friday cut-off, spread, stale quotes, news (MT5 calendar, live only), cooldowns, trades per hour, requests per minute, Algo Trading permissions | ✅ |
+| Capital protection: daily loss limit (closed + floating, flatten and halt), loss streak pause and halt, equity kill switch, playbook guard, slippage guard | ✅ |
+| Forced flatten: daily 23:30, Friday 22:45, news window | ✅ |
+| Accounting from real deals (commission included), rebuilt from history after a restart; manual closes are counted | ✅ |
+| Dashboard: entry gate with the blocking reason, setups, last signal and action, positions, today per playbook | ✅ |
+| Breakeven lock, runner, time stop, state exit (§6) | ⏳ Round 3 |
+| Persistence of streaks, pauses and peak equity across restarts; per-trade CSV | ⏳ Round 3 |
+
+Consequences of R2 not having the breakeven lock yet:
+- Trades exit only at their stop, their target or a forced flatten.
+- `InpStackNeedsBE = true` means at most one position per direction for now.
+
+How R2 was checked before release (there is no MQL5 compiler in the sandbox):
+- The file was translated to C++ and compiled with `-Wall -Wextra -Wconversion -Wsign-conversion -Wshadow`: no errors, no warnings.
+- An end-to-end simulation ran the real EA logic against a simulated hedging broker for a synthetic week of ticks. It checked on every tick that every position has a stop, that no trade risks more than the cap, the position limits, no self-hedge, entries only inside the session, the flatten times, and that the EA's daily P/L matches the broker exactly. It also covered a restart mid-day, an IOC-only broker, a broker that rejects stops on orders, a broker that refuses stops completely, the daily loss limit and the kill switch.
+- Scenario tests covered the news window, the daily and Friday flatten, a position without a stop after a restart, a manual close, the real-account lock and OBSERVE mode.
+- The synthetic market only tests the mechanics. Its profit numbers say nothing about real performance.
