@@ -22,7 +22,7 @@
 //+------------------------------------------------------------------+
 //| Constants                                                        |
 //+------------------------------------------------------------------+
-#define V11_BUILD               "1.0"
+#define V11_BUILD               "1.1"
 #define V11_TICKBUF             4096      // tick ring buffer size (power of two)
 #define V11_TICKMASK            4095      // V11_TICKBUF - 1
 #define V11_SPREAD_SAMPLES      300       // 5 minutes of 1-second spread samples
@@ -1971,16 +1971,20 @@ int Dispatch(const bool isClose, const int dir, const ulong ticket, const string
       ZeroMemory(res);
       attempts++;
       NoteRequest();
+      bool sent = false;
       if(UseAsync())
         {
-         if(OrderSendAsync(req, res))
+         sent = OrderSendAsync(req, res);
+         if(sent)
            {
             reqId = res.request_id;
             return V11_SEND_PENDING;
            }
         }
       else
-         OrderSend(req, res);
+         sent = OrderSend(req, res);
+      if(!sent && res.retcode == 0)
+         res.retcode = TRADE_RETCODE_ERROR;      // refused inside the terminal with no result code
       rc = res.retcode;
       if(IsDone(rc))
         {

@@ -1,6 +1,6 @@
 # Gold Triad Harvester v11 — ডিজাইন স্পেসিফিকেশন
 
-**অবস্থা:** কোড লেখা হয়েছে (`Gold_Triad_Harvester_v11.00.mq5`, build 1.0)। Strict compile check-এ 0 error, 0 warning। Runtime test (Strategy Tester ও demo) user করবেন।
+**অবস্থা:** কোড লেখা হয়েছে (`Gold_Triad_Harvester_v11.00.mq5`, build 1.1)। MetaEditor compile (user, build 1.0): 0 error, 1 warning (line 1983: `OrderSend`-এর return value check হয়নি) — build 1.1-এ ঠিক করা হয়েছে। Runtime test (Strategy Tester ও demo) user করবেন।
 
 | | |
 |---|---|
