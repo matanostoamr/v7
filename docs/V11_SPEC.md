@@ -1,10 +1,10 @@
 # Gold Triad Harvester v11 — ডিজাইন স্পেসিফিকেশন
 
-**অবস্থা:** খসড়া (draft)। কোড এখনো লেখা হয়নি। §10-এর তিনটি সিদ্ধান্ত চূড়ান্ত হলে কোড শুরু হবে।
+**অবস্থা:** কোড লেখা হয়েছে (`Gold_Triad_Harvester_v11.00.mq5`, build 1.0)। Strict compile check-এ 0 error, 0 warning। Runtime test (Strategy Tester ও demo) user করবেন।
 
 | | |
 |---|---|
-| EA file (পরিকল্পিত) | `Gold_Triad_Harvester_v11.00.mq5` |
+| EA file | `Gold_Triad_Harvester_v11.00.mq5` |
 | Branch | `feat/v11-triad-harvester` |
 | Symbol / chart | XAUUSD, M1 |
 | Account | Pepperstone, hedging, GBP |
@@ -103,6 +103,7 @@ Basket পুরো খালি থাকলে (শুরুতে, বা bas
 | Daily limit | দিনের realized + floating loss সীমা ছুঁলে সব বন্ধ, ওই server দিনের জন্য বিরতি। | £50 |
 | শুক্রবার | 21:00-এর পর নতুন entry নয়, 22:45-এ সব বন্ধ (weekend gap থেকে সুরক্ষা)। | চালু |
 | Real account lock | Real-money account-এ `InpAllowRealAccount = true` ছাড়া কোনো order নয়। | v10 থেকে |
+| Equity kill switch (যোগ করা) | Equity তার সর্বোচ্চ মান থেকে এই % নামলে সব বন্ধ, আর কোনো trade নয়। আবার চালু করতে `InpResetKillSwitch = true`। | 10% |
 
 - দৈনিক flatten নেই; basket রাত পার করে। শুধু rollover-এর সময় নতুন entry বন্ধ থাকে।
 - Basket stop, daily limit বা শুক্রবারে সব বন্ধ হলে cycle শেষ হয়: Bank = max(0, Bank − ওই বন্ধে realized loss)।
@@ -121,31 +122,37 @@ Basket পুরো খালি থাকলে (শুরুতে, বা bas
 - কোনো trade-এর বড় target বা runner। সব trade £0.50।
 - তিনটি trade একই দিকে।
 
-## 10. সিদ্ধান্ত বাকি
+## 10. সিদ্ধান্ত (চূড়ান্ত: user লিখেছেন "ok go")
 
-1. **Re-anchor:** চালু থাকবে? (প্রস্তাব: হ্যাঁ, loss ≥ £1.50, Bank-এ £0.50 রিজার্ভ।)
-2. **Harvest পদ্ধতি:** bot-side harvest + swap + backup TP? (প্রস্তাব: হ্যাঁ।)
-3. **সুরক্ষার মান:** disaster stop £25/trade, basket stop £25, daily limit £50 ঠিক আছে?
+1. **Re-anchor:** চালু; loss ≥ £1.50, Bank-এ £0.50 রিজার্ভ।
+2. **Harvest পদ্ধতি:** bot-side harvest + swap + backup TP। Live-এ swap async (একসাথে পাঠানো), Strategy Tester-এ sync।
+3. **সুরক্ষার মান:** disaster stop £25/trade, basket stop £25 (cooldown 60 min), daily limit £50।
 
-## 11. Inputs (খসড়া)
+## 11. Inputs
 
 | গ্রুপ | Input | Default |
 |---|---|---|
-| General | `InpMagic` | 110001 |
+| General | `InpMode` | TRADE (বা OBSERVE: শুধু দেখায়, order নয়) |
+| | `InpMagic` | 110001 |
 | | `InpAllowRealAccount` | false |
 | Harvest | `InpLots` | 0.01 |
 | | `InpHarvestNet` | 0.50 |
 | | `InpBackupTpNet` | 0.80 |
-| | `InpCommissionPerLotRT` | 4.00 |
+| | `InpCommissionPerLotRT` | 4.00 (real deal-এ বেশি দেখালে bot নিজে বাড়ায়) |
+| | `InpUseAsync` | true (live-এ close ও refill একসাথে) |
 | Pulse | `InpPulseOn` / `InpPulseOff` | 40 / 15 |
 | | `InpPulseConfirmBars` | 2 |
 | Re-anchor | `InpUseReanchor` | true |
 | | `InpReanchorLoss` | 1.50 |
 | | `InpBankKeep` | 0.50 |
+| | `InpResetBank` | false (true দিলে start-এ Bank = 0) |
 | Entry gate | `InpMaxSpreadPts` / `InpSpreadSpikeRatio` | 30 / 1.8 |
 | | `InpNewsBeforeMin` / `InpNewsAfterMin` | 10 / 15 |
+| | `InpShockATR` / `InpShockWindowSec` / `InpShockPauseSec` | 3.0 / 20 / 120 |
 | | `InpMinMarginLevel` | 150% |
+| | `InpTradeStart` / `InpTradeEnd` / `InpMondayDelayMin` | 01:30 / 23:00 / 60 |
 | Protection | `InpDisasterLoss` | 25.00 |
 | | `InpBasketStop` / `InpBasketCooldownMin` | 25.00 / 60 |
 | | `InpDailyLossLimit` | 50.00 |
 | | `InpFridayLastEntry` / `InpFridayFlatten` | 21:00 / 22:45 |
+| | `InpEquityKillPct` / `InpResetKillSwitch` | 10 / false |
