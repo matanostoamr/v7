@@ -1,6 +1,6 @@
 # Gold Triad Harvester v11 — ডিজাইন স্পেসিফিকেশন
 
-**অবস্থা:** কোড লেখা হয়েছে (`Gold_Triad_Harvester_v11.00.mq5`, build 1.1)। MetaEditor compile (user, build 1.0): 0 error, 1 warning (line 1983: `OrderSend`-এর return value check হয়নি) — build 1.1-এ ঠিক করা হয়েছে। Runtime test (Strategy Tester ও demo) user করবেন।
+**অবস্থা:** কোড লেখা হয়েছে (`Gold_Triad_Harvester_v11.00.mq5`, build 1.2)। Build 1.2-এ যোগ হয়েছে: trade role (BUY anchor, SELL anchor, worker), worker-এর −£3 stop, পরপর stop হলে worker pause (paper worker), anchor disaster SL লাগলে পুরো basket বন্ধ, anchor guard (option B), cycle P&L-এ −£40 basket stop, এবং Pulse fix। বিস্তারিত: [V11_BUILD_1.2_PLAN.md](V11_BUILD_1.2_PLAN.md)। MetaEditor compile (user, build 1.0): 0 error, 1 warning — build 1.1-এ ঠিক করা হয়েছে। Runtime test (Strategy Tester ও demo) user করবেন।
 
 | | |
 |---|---|
@@ -58,7 +58,7 @@ Basket পুরো খালি থাকলে (শুরুতে, বা bas
 | NEUTRAL | DOWN | score ≤ −40, পরপর ২টি candle |
 | UP | DOWN (confirmed reversal) | score ≤ −40, পরপর ২টি candle |
 | DOWN | UP (confirmed reversal) | score ≥ +40, পরপর ২টি candle |
-| UP বা DOWN | NEUTRAL | trend মরে গেছে: score −15 থেকে +15-এর মধ্যে, পরপর ২টি candle |
+| UP বা DOWN | NEUTRAL | trend মরে গেছে: UP-এ score +15-এর নিচে (DOWN-এ −15-এর ওপরে), পরপর ২টি candle, কিন্তু উল্টো দিকের জন্য যথেষ্ট শক্ত নয় (build 1.2 fix) |
 
 ## 4. Harvest
 

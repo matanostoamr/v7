@@ -2,16 +2,19 @@
 //|                               Gold_Triad_Harvester_v11.00.mq5    |
 //|        Gold Triad Harvester v11 - 3-trade harvesting basket      |
 //|                                                                  |
-//|  Up to 3 trades. The basket follows the market direction:        |
-//|    UP      = 2 BUY + 1 SELL                                      |
-//|    DOWN    = 1 BUY + 2 SELL                                      |
-//|    NEUTRAL = 1 BUY + 1 SELL (the third slot waits)               |
+//|  Up to 3 trades: a BUY anchor and a SELL anchor that are always  |
+//|  kept, plus one worker that follows the market direction:        |
+//|    UP      = BUY anchor + SELL anchor + BUY worker               |
+//|    DOWN    = BUY anchor + SELL anchor + SELL worker              |
+//|    NEUTRAL = BUY anchor + SELL anchor (no worker)                |
 //|  Every trade is harvested at a fixed net profit. The close and   |
 //|  its replacement are sent together ("swap"), one swap at a time. |
 //|  Harvest profit goes into the Harvest Bank, which pays for       |
-//|  re-anchoring trades that are stuck far from the price.          |
+//|  re-anchoring anchors that are stuck far from the price.         |
+//|  The worker has its own short stop. An anchor disaster stop      |
+//|  closes the whole basket.                                        |
 //|                                                                  |
-//|  Spec: docs/V11_SPEC.md                                          |
+//|  Spec: docs/V11_SPEC.md, build 1.2: docs/V11_BUILD_1.2_PLAN.md   |
 //+------------------------------------------------------------------+
 #property copyright   "matanostoamr"
 #property link        "https://github.com/matanostoamr/v7"
@@ -22,7 +25,7 @@
 //+------------------------------------------------------------------+
 //| Constants                                                        |
 //+------------------------------------------------------------------+
-#define V11_BUILD               "1.1"
+#define V11_BUILD               "1.2"
 #define V11_TICKBUF             4096      // tick ring buffer size (power of two)
 #define V11_TICKMASK            4095      // V11_TICKBUF - 1
 #define V11_SPREAD_SAMPLES      300       // 5 minutes of 1-second spread samples
@@ -33,7 +36,7 @@
 #define V11_TIME_RING           512       // ring size for request timestamps
 #define V11_TAGS                32        // remembered reasons for closes sent by the EA
 #define V11_HOLES               8         // remembered empty-slot start times (gap meter)
-#define V11_PANEL_LINES         18
+#define V11_PANEL_LINES         19
 #define V11_SEED_BARS           40        // closed M1 bars replayed at start to set the direction
 #define V11_RATE_WINDOW_MS      10000     // window for the ticks-per-second figure
 #define V11_TR_TIMEOUT_MS       15000     // a swap that has not settled by then is reconciled
@@ -44,6 +47,13 @@
 #define V11_TR_FILL             1         // open only: start pair, third slot, waiting slot
 #define V11_TR_HARVEST          2         // close a winner (+ its replacement)
 #define V11_TR_REANCHOR         3         // close a stuck trade (+ its replacement)
+
+//--- trade roles (kept in the order comment, e.g. "V11 FL-A", and remembered by ticket)
+#define V11_ROLE_NONE           0         // not known yet
+#define V11_ROLE_ANCHOR         1         // the BUY anchor or the SELL anchor: always kept
+#define V11_ROLE_WORKER         2         // the third trade, in the market direction
+#define V11_ROLE_EXTRA          3         // more trades than the basket needs: harvested without refill
+#define V11_ROLE_MAP            64        // remembered roles of recent tickets
 
 //--- request states inside a transition
 #define V11_ST_TODO             0         // not sent yet
@@ -102,6 +112,13 @@ input bool          InpUseReanchor        = true;             // Re-anchor stuck
 input double        InpReanchorLoss       = 1.50;             // A trade is stuck at this net loss
 input double        InpBankKeep           = 0.50;             // The bank must keep at least this after paying
 input bool          InpResetBank          = false;            // Reset the bank to 0 at start
+input bool          InpReanchorAnchorsOnly = true;            // Re-anchor only the two anchors, never the worker
+
+input group "4b. Worker (third trade)"
+input double        InpWorkerStop         = 3.00;             // Worker stop at this net loss (bot + server SL)
+input bool          InpWorkerWaitReset    = true;             // After a worker stop, that direction waits until the Pulse leaves it
+input int           InpWorkerPauseAfter   = 3;                // Pause the worker after this many stops in a row (0 = never)
+input int           InpWorkerResumeAfter  = 3;                // Resume after this many paper-worker harvests in a row
 
 input group "5. Entry gate"
 input int           InpMaxSpreadPts       = 30;               // Max spread for new trades (points)
@@ -120,14 +137,15 @@ input int           InpNewsBeforeMin      = 10;               // No new trades b
 input int           InpNewsAfterMin       = 15;               // No new trades after high-impact news (min)
 
 input group "6. Protection"
-input double        InpDisasterLoss       = 25.00;            // Server stop on every trade at this loss
-input double        InpBasketStop         = 25.00;            // Close all when the open trades together lose this
+input double        InpDisasterLoss       = 25.00;            // Server stop on each anchor at this loss (then the basket closes)
+input double        InpBasketStop         = 40.00;            // Close all when the cycle (closed + open, after costs) loses this
 input int           InpBasketCooldownMin  = 60;               // Wait after a basket stop before a new cycle (min)
 input double        InpDailyLossLimit     = 50.00;            // Close all and stop for the day at this loss
 input string        InpFridayLastEntry    = "21:00";          // Friday: last new trade (HH:MM)
 input string        InpFridayFlatten      = "22:45";          // Friday: close all (HH:MM)
 input double        InpEquityKillPct      = 10.0;             // Stop if equity falls this % below its peak
 input bool          InpResetKillSwitch    = false;            // Reset the equity kill switch at start
+input bool          InpAnchorGuard        = true;             // Never leave an anchor alone (plan 3b, option B)
 
 input group "7. Execution and display"
 input int           InpDeviationPts       = 20;               // Max deviation, Instant execution only (points)
@@ -302,6 +320,7 @@ V11Pulse g_p;
 int      g_bias       = 0;               // +1 UP, -1 DOWN, 0 NEUTRAL
 int      g_candidate  = 0;               // direction waiting for confirmation
 int      g_candCount  = 0;               // bars it has held (0 = no candidate)
+int      g_candStrong = 0;               // UP/DOWN: of those bars, how many in a row were strong enough to reverse
 datetime g_biasSince  = 0;
 datetime g_lastM1Bar  = 0;
 string   g_dataReason = "waiting for data";
@@ -319,6 +338,8 @@ struct V11Pos
    double            tp;
    double            net;                // net if closed now: profit + swap - round-trip commission
    datetime          opened;
+   long              openedMsc;          // open time in milliseconds
+   int               role;               // V11_ROLE_ANCHOR, V11_ROLE_WORKER or V11_ROLE_EXTRA
    bool              closing;            // a close for it is in flight
   };
 
@@ -326,6 +347,7 @@ struct V11Plan
   {
    int               n;
    int               dir[3];
+   int               role[3];
   };
 
 V11Pos   g_pos[V11_MAX_POS];
@@ -335,6 +357,12 @@ int      g_ns         = 0;               // SELLs that are not closing
 double   g_floating   = 0.0;             // sum of the nets of all basket positions
 ulong    g_known[V11_MAX_POS];           // tickets seen by the previous scan
 int      g_knownCount = 0;
+int      g_anchorB    = -1;              // index of the BUY anchor (not closing), -1 = missing
+int      g_anchorS    = -1;              // index of the SELL anchor (not closing), -1 = missing
+int      g_worker     = -1;              // index of the worker (not closing), -1 = none
+ulong    g_roleTicket[V11_ROLE_MAP];     // last role seen for recent tickets
+int      g_roleValue[V11_ROLE_MAP];
+int      g_roleNext   = 0;
 
 //+------------------------------------------------------------------+
 //| Transition (swap): at most one in flight                         |
@@ -342,6 +370,7 @@ int      g_knownCount = 0;
 struct V11Open
   {
    int               dir;
+   int               role;
    int               state;
    uint              reqId;
    ulong             ticket;
@@ -417,6 +446,22 @@ string   g_shockReason     = "";
 double   g_shockRangePts   = 0.0;
 datetime g_lastFlattenTry  = 0;
 string   g_flattenMode     = "";         // why the basket must stay flat right now ("" = it need not)
+
+//--- worker (third trade)
+int      g_workerStreak = 0;             // worker stops in a row (a worker harvest resets it)
+int      g_workerLock   = 0;             // direction that waits until the Pulse has left it (0 = none)
+bool     g_workerPaused = false;         // real worker paused; the paper worker runs
+int      g_paperDir     = 0;             // paper worker direction (0 = none open)
+double   g_paperOpen    = 0.0;           // paper worker entry (ask for BUY, bid for SELL)
+int      g_paperWins    = 0;             // paper harvests in a row
+int      g_paperLock    = 0;             // paper worker's own same-direction wait
+
+//--- cycle (basket from empty to empty) and anchor reset
+bool     g_cycleActive   = false;
+double   g_cycleClosed   = 0.0;          // money closed in this cycle, after costs
+long     g_cycleStartMsc = 0;            // open time of the cycle's first trade (ms)
+bool     g_resetMode     = false;        // closing the basket after an anchor problem
+string   g_resetReason   = "";
 
 datetime g_reqTimes[V11_TIME_RING];
 int      g_reqHead  = 0;
@@ -573,13 +618,61 @@ string BiasName(const int bias)
    return "NEUTRAL";
   }
 
-string TargetText(const int bias)
+string RoleName(const int role)
   {
-   if(bias > 0)
-      return "2 BUY + 1 SELL";
-   if(bias < 0)
-      return "1 BUY + 2 SELL";
-   return "1 BUY + 1 SELL";
+   if(role == V11_ROLE_ANCHOR)
+      return "anchor";
+   if(role == V11_ROLE_WORKER)
+      return "worker";
+   if(role == V11_ROLE_EXTRA)
+      return "extra";
+   return "unknown";
+  }
+
+//--- role letter at the end of an order comment: "V11 FL-A" (anchor), "V11 HR-W" (worker)
+string RoleLetter(const int role)
+  {
+   if(role == V11_ROLE_ANCHOR)
+      return "A";
+   if(role == V11_ROLE_WORKER)
+      return "W";
+   return "X";
+  }
+
+int RoleFromComment(const string comment)
+  {
+   int len = StringLen(comment);
+   if(len < 2 || StringSubstr(comment, len - 2, 1) != "-")
+      return V11_ROLE_NONE;
+   string r = StringSubstr(comment, len - 1, 1);
+   if(r == "A")
+      return V11_ROLE_ANCHOR;
+   if(r == "W")
+      return V11_ROLE_WORKER;
+   if(r == "X")
+      return V11_ROLE_EXTRA;
+   return V11_ROLE_NONE;
+  }
+
+void RememberRole(const ulong ticket, const int role)
+  {
+   for(int i = 0; i < V11_ROLE_MAP; i++)
+      if(g_roleTicket[i] == ticket)
+        {
+         g_roleValue[i] = role;
+         return;
+        }
+   g_roleTicket[g_roleNext] = ticket;
+   g_roleValue[g_roleNext]  = role;
+   g_roleNext = (g_roleNext + 1) % V11_ROLE_MAP;
+  }
+
+int RecallRole(const ulong ticket)
+  {
+   for(int i = 0; i < V11_ROLE_MAP; i++)
+      if(g_roleTicket[i] == ticket)
+         return g_roleValue[i];
+   return V11_ROLE_NONE;
   }
 
 string BasketText(const int nb, const int ns)
@@ -670,13 +763,30 @@ double BackupTpPts(const double lots)
    return (InpBackupTpNet + CommRT(lots)) / mpp;
   }
 
-//--- distance (points) from the entry to the disaster stop
+//--- distance (points) from the entry to the disaster stop (anchors)
 double DisasterPts(const double lots)
   {
    double mpp = MoneyPerPoint(lots);
    if(mpp <= 0.0)
       return 0.0;
    return (InpDisasterLoss - CommRT(lots)) / mpp;
+  }
+
+//--- distance (points) from the entry to the worker stop
+double WorkerStopPts(const double lots)
+  {
+   double mpp = MoneyPerPoint(lots);
+   if(mpp <= 0.0)
+      return 0.0;
+   return (InpWorkerStop - CommRT(lots)) / mpp;
+  }
+
+//--- paper worker: net if it were closed at 'px' (bid for BUY, ask for SELL)
+double PaperNet(const double px)
+  {
+   if(g_paperDir == 0 || g_point <= 0.0)
+      return 0.0;
+   return g_paperDir * (px - g_paperOpen) / g_point * MoneyPerPoint(g_lots) - CommRT(g_lots);
   }
 
 int LotDigits(const double step)
@@ -753,6 +863,9 @@ bool ValidateInputs(string &err)
    if(!Need(InpMondayDelayMin >= 0, "InpMondayDelayMin must be >= 0", err)) return false;
    if(!Need(InpNewsBeforeMin >= 0 && InpNewsAfterMin >= 0, "Check the news window inputs", err)) return false;
    if(!Need(InpDisasterLoss > InpReanchorLoss && InpDisasterLoss > InpCommissionPerLotRT * InpLots, "InpDisasterLoss must be above InpReanchorLoss and the commission", err)) return false;
+   if(!Need(InpWorkerStop > InpCommissionPerLotRT * InpLots && InpWorkerStop < InpDisasterLoss, "InpWorkerStop must be above the commission and below InpDisasterLoss", err)) return false;
+   if(!Need(InpWorkerPauseAfter >= 0 && InpWorkerPauseAfter <= 20, "InpWorkerPauseAfter must be 0..20", err)) return false;
+   if(!Need(InpWorkerResumeAfter >= 1 && InpWorkerResumeAfter <= 20, "InpWorkerResumeAfter must be 1..20", err)) return false;
    if(!Need(InpBasketStop > 0.0 && InpBasketCooldownMin >= 0, "Check InpBasketStop / InpBasketCooldownMin", err)) return false;
    if(!Need(InpDailyLossLimit > 0.0, "InpDailyLossLimit must be > 0", err)) return false;
    if(!Need(InpEquityKillPct > 0.0 && InpEquityKillPct < 100.0, "InpEquityKillPct must be between 0 and 100", err)) return false;
@@ -842,6 +955,7 @@ void ResetTr()
    for(int i = 0; i < 3; i++)
      {
       g_tr.open[i].dir          = 0;
+      g_tr.open[i].role         = V11_ROLE_NONE;
       g_tr.open[i].state        = V11_ST_DONE;
       g_tr.open[i].reqId        = 0;
       g_tr.open[i].ticket       = 0;
@@ -876,6 +990,7 @@ void ResetAll()
    g_bias       = 0;
    g_candidate  = 0;
    g_candCount  = 0;
+   g_candStrong = 0;
    g_biasSince  = 0;
    g_lastM1Bar  = 0;
    g_dataReason = "waiting for data";
@@ -886,6 +1001,25 @@ void ResetAll()
    g_floating   = 0.0;
    g_knownCount = 0;
    ArrayInitialize(g_known, 0);
+   g_anchorB    = -1;
+   g_anchorS    = -1;
+   g_worker     = -1;
+   ArrayInitialize(g_roleTicket, 0);
+   ArrayInitialize(g_roleValue, 0);
+   g_roleNext   = 0;
+
+   g_workerStreak  = 0;
+   g_workerLock    = 0;
+   g_workerPaused  = false;
+   g_paperDir      = 0;
+   g_paperOpen     = 0.0;
+   g_paperWins     = 0;
+   g_paperLock     = 0;
+   g_cycleActive   = false;
+   g_cycleClosed   = 0.0;
+   g_cycleStartMsc = 0;
+   g_resetMode     = false;
+   g_resetReason   = "";
 
    ResetTr();
    g_trSeq = 0;
@@ -1117,50 +1251,56 @@ bool ComputePulse(const int shift, V11Pulse &p)
   }
 
 //--- direction changes need InpPulseConfirmBars bars in a row (confirmation + hysteresis)
+//--- build 1.2: UP is left by any score below +InpPulseOff (DOWN by any score above -InpPulseOff).
+//--- 1.1 ignored scores between -InpPulseOn and -InpPulseOff here and reset the count on them.
 void ApplyPulse(const V11Pulse &p, const datetime when, const bool quiet)
   {
-   double score = p.score;
-   int    zone  = 2;                    // 2 = between the thresholds
-   if(score >= InpPulseOn)
-      zone = 1;
-   else if(score <= -InpPulseOn)
-      zone = -1;
-   else if(MathAbs(score) < InpPulseOff)
-      zone = 0;
-   int target = 99;                      // 99 = this bar does not push towards a change
+   double score  = p.score;
+   int    target = 99;                   // 99 = this bar does not push towards a change
    if(g_bias == 0)
      {
-      if(zone == 1 || zone == -1)
-         target = zone;
-     }
-   else if(g_bias > 0)
-     {
-      if(zone == -1 || zone == 0)
-         target = zone;
+      if(score >= InpPulseOn)
+         target = 1;
+      else if(score <= -InpPulseOn)
+         target = -1;
      }
    else
      {
-      if(zone == 1 || zone == 0)
-         target = zone;
+      double along = score * g_bias;     // the score seen from the current direction
+      if(along < InpPulseOff)
+         target = (along <= -InpPulseOn ? -g_bias : 0);
      }
    if(target == 99)
      {
-      g_candCount = 0;
+      g_candCount  = 0;
+      g_candStrong = 0;
       return;
      }
-   if(g_candCount > 0 && g_candidate == target)
-      g_candCount++;
+   if(g_bias == 0)
+     {
+      //--- from NEUTRAL: the same direction N bars in a row (unchanged)
+      if(g_candCount > 0 && g_candidate == target)
+         g_candCount++;
+      else
+        {
+         g_candidate = target;
+         g_candCount = 1;
+        }
+     }
    else
      {
-      g_candidate = target;
-      g_candCount = 1;
+      //--- from UP or DOWN: N bars in a row against it; reverse only if the last N were all strong
+      g_candCount++;
+      g_candStrong = (target != 0 ? g_candStrong + 1 : 0);
+      g_candidate  = (g_candStrong >= InpPulseConfirmBars ? -g_bias : 0);
      }
    if(g_candCount < InpPulseConfirmBars)
       return;
-   int prev    = g_bias;
-   g_bias      = target;
-   g_candCount = 0;
-   g_biasSince = when;
+   int prev     = g_bias;
+   g_bias       = g_candidate;
+   g_candCount  = 0;
+   g_candStrong = 0;
+   g_biasSince  = when;
    if(!quiet)
       V11Log(1, StringFormat("PULSE %s -> %s | score %+.0f (trend %+.2f, EMA %+.2f, structure %+.2f, ER %+.2f) | basket %s",
                              BiasName(prev), BiasName(g_bias), score, p.t, p.e, p.s, p.m, BasketText(g_nb, g_ns)));
@@ -1405,6 +1545,47 @@ bool MarginOk(const int addCount, const int freeCount, string &why)
    return true;
   }
 
+//--- market filters for a new trade: data, session, spread, shock, news (also used by the paper worker)
+bool MarketFiltersOpen(string &why)
+  {
+   datetime now = NowServer();
+   if(!g_p.ready)
+     {
+      why = "warming up: " + g_dataReason;
+      return false;
+     }
+   string sw = "";
+   if(!SessionOpen(now, sw))
+     {
+      why = "session " + sw;
+      return false;
+     }
+   double sp = CurrentSpreadPts();
+   if(sp > InpMaxSpreadPts)
+     {
+      why = StringFormat("spread %.0f > max %d", sp, InpMaxSpreadPts);
+      return false;
+     }
+   if(g_spreadCount >= V11_MIN_SPREAD_SAMPLES && g_spreadMedian > 0.0 && sp > InpSpreadSpikeRatio * g_spreadMedian)
+     {
+      why = StringFormat("spread spike %.0f > %.1f x median %.0f", sp, InpSpreadSpikeRatio, g_spreadMedian);
+      return false;
+     }
+   if(now < g_shockUntil)
+     {
+      why = StringFormat("shock pause %s: %s", FormatDuration((long)(g_shockUntil - now)), g_shockReason);
+      return false;
+     }
+   string nw = "";
+   if(NewsWindow(now, nw))
+     {
+      why = "news window: " + nw;
+      return false;
+     }
+   why = "open";
+   return true;
+  }
+
 //--- may the EA open 'addCount' new trades now (while 'freeCount' trades close)?
 bool EntryGate(const int addCount, const int freeCount, string &why)
   {
@@ -1446,34 +1627,8 @@ bool EntryGate(const int addCount, const int freeCount, string &why)
       why = "the broker does not allow full trading on this symbol right now";
       return false;
      }
-   string sw = "";
-   if(!SessionOpen(now, sw))
-     {
-      why = "session " + sw;
+   if(!MarketFiltersOpen(why))
       return false;
-     }
-   double sp = CurrentSpreadPts();
-   if(sp > InpMaxSpreadPts)
-     {
-      why = StringFormat("spread %.0f > max %d", sp, InpMaxSpreadPts);
-      return false;
-     }
-   if(g_spreadCount >= V11_MIN_SPREAD_SAMPLES && g_spreadMedian > 0.0 && sp > InpSpreadSpikeRatio * g_spreadMedian)
-     {
-      why = StringFormat("spread spike %.0f > %.1f x median %.0f", sp, InpSpreadSpikeRatio, g_spreadMedian);
-      return false;
-     }
-   if(now < g_shockUntil)
-     {
-      why = StringFormat("shock pause %s: %s", FormatDuration((long)(g_shockUntil - now)), g_shockReason);
-      return false;
-     }
-   string nw = "";
-   if(NewsWindow(now, nw))
-     {
-      why = "news window: " + nw;
-      return false;
-     }
    if(!g_isTester && g_haveTick)
      {
       long ageMs = ((long)GetMicrosecondCount() - g_lastTickUs) / 1000;
@@ -1492,53 +1647,61 @@ bool EntryGate(const int addCount, const int freeCount, string &why)
 //+------------------------------------------------------------------+
 //| Basket rules (spec section 2)                                    |
 //+------------------------------------------------------------------+
-//--- direction for ONE empty place (first matching row of the rule table), 0 = none
-int NextDir(const int nb, const int ns, const int bias)
+//--- build 1.2: each trade has a role. The BUY anchor and the SELL anchor are always wanted; the
+//--- third place is the worker, in the Pulse direction. A role never changes (no promotion).
+
+//--- direction for the worker now, 0 = none: the Pulse direction, unless paused or waiting after a stop
+int WorkerDir()
   {
-   if(nb + ns >= 3)
+   if(g_bias == 0 || g_workerPaused)
       return 0;
-   if(nb == 0)
-      return 1;
-   if(ns == 0)
-      return -1;
-   if(nb == 1 && ns == 1)
-     {
-      if(bias > 0)
-         return 1;
-      if(bias < 0)
-         return -1;
-     }
-   return 0;
+   if(InpWorkerWaitReset && g_workerLock != 0 && g_bias == g_workerLock)
+      return 0;
+   return g_bias;
   }
 
-//--- opens for an idle basket: the start pair, or one step of the rule table
-void FillPlan(const int nb, const int ns, const int bias, V11Plan &plan)
+void PlanAdd(V11Plan &plan, const int dir, const int role)
+  {
+   if(plan.n >= 3)
+      return;
+   plan.dir[plan.n]  = dir;
+   plan.role[plan.n] = role;
+   plan.n++;
+  }
+
+//--- opens for the basket as it is now: missing anchors first (both = start pair), else the worker
+void FillPlan(V11Plan &plan)
   {
    plan.n = 0;
-   if(nb == 0 && ns == 0)
+   if(g_anchorB < 0)
+      PlanAdd(plan, 1, V11_ROLE_ANCHOR);
+   if(g_anchorS < 0)
+      PlanAdd(plan, -1, V11_ROLE_ANCHOR);
+   if(plan.n > 0 || g_worker >= 0 || g_nb + g_ns >= 3)
+      return;
+   int d = WorkerDir();
+   if(d != 0)
+      PlanAdd(plan, d, V11_ROLE_WORKER);
+  }
+
+//--- replacement for a swap of position 'p': an anchor in its own direction; the worker by the worker
+//--- rules (it may change side here, at its own harvest); extras none
+void RefillPlan(const int p, V11Plan &plan)
+  {
+   plan.n = 0;
+   if(p < 0 || p >= g_posCount)
+      return;
+   if(g_pos[p].role == V11_ROLE_ANCHOR)
      {
-      plan.dir[0] = 1;
-      plan.dir[1] = -1;
-      plan.n      = 2;
+      PlanAdd(plan, g_pos[p].dir, V11_ROLE_ANCHOR);
       return;
      }
-   int d = NextDir(nb, ns, bias);
-   if(d != 0)
+   int left = g_nb + g_ns - (g_pos[p].closing ? 0 : 1);
+   if(g_pos[p].role == V11_ROLE_WORKER && left < 3)
      {
-      plan.dir[0] = d;
-      plan.n      = 1;
-     }
-  }
-
-//--- replacement for a swap, decided on the positions that remain after the close
-void RefillPlan(const int nbAfter, const int nsAfter, const int bias, V11Plan &plan)
-  {
-   plan.n = 0;
-   int d  = NextDir(nbAfter, nsAfter, bias);
-   if(d != 0)
-     {
-      plan.dir[0] = d;
-      plan.n      = 1;
+      int d = WorkerDir();
+      if(d != 0)
+         PlanAdd(plan, d, V11_ROLE_WORKER);
      }
   }
 
@@ -1548,8 +1711,18 @@ string PlanText(const V11Plan &plan)
       return "no refill";
    string s = "";
    for(int i = 0; i < plan.n; i++)
-      s += (i > 0 ? " + " : "") + DirName(plan.dir[i]);
+      s += (i > 0 ? " + " : "") + DirName(plan.dir[i]) + " " + RoleName(plan.role[i]);
    return s;
+  }
+
+string TargetText()
+  {
+   string w = "no worker (NEUTRAL)";
+   if(g_workerPaused)
+      w = "worker paused";
+   else if(g_bias != 0)
+      w = (WorkerDir() != 0 ? DirName(g_bias) + " worker" : DirName(g_bias) + " worker waits (stopped, Pulse not reset)");
+   return "BUY anchor + SELL anchor + " + w;
   }
 
 //+------------------------------------------------------------------+
@@ -1636,6 +1809,10 @@ string TagName(const string tag)
       return "KILL_SWITCH";
    if(tag == "NS")
       return "NO_STOP";
+   if(tag == "WS")
+      return "WORKER_STOP";
+   if(tag == "AR")
+      return "ANCHOR_RESET";
    return (tag == "" ? "EA" : tag);
   }
 
@@ -1646,7 +1823,8 @@ string TagFromComment(const string comment)
    if(len < 2)
       return "";
    string tail = StringSubstr(comment, len - 2, 2);
-   if(tail == "HV" || tail == "RA" || tail == "BS" || tail == "DL" || tail == "FF" || tail == "KS" || tail == "NS")
+   if(tail == "HV" || tail == "RA" || tail == "BS" || tail == "DL" || tail == "FF" || tail == "KS" || tail == "NS" ||
+      tail == "WS" || tail == "AR")
       return tail;
    return "";
   }
@@ -1689,6 +1867,158 @@ double DayNet()
    return g_realizedToday + g_floating;
   }
 
+//--- cycle result for the basket stop: closed in this cycle + open now, both after costs
+double CycleNet()
+  {
+   return (g_cycleActive ? g_cycleClosed : 0.0) + BasketNet();
+  }
+
+//--- roles after a scan: the role in the comment (or remembered) wins, oldest first; at most one anchor
+//--- per side and one worker. A trade without a role (e.g. opened by build 1.1) fills a missing anchor
+//--- of its side first, then the worker place. Trades that are closing choose last.
+void AssignRoles()
+  {
+   int  n = g_posCount;
+   int  order[V11_MAX_POS];
+   bool used[V11_MAX_POS];
+   int  want[V11_MAX_POS];
+   for(int i = 0; i < n; i++)
+     {
+      used[i] = false;
+      want[i] = V11_ROLE_NONE;
+     }
+   for(int k = 0; k < n; k++)
+     {
+      int best = -1;
+      for(int i = 0; i < n; i++)
+        {
+         if(used[i])
+            continue;
+         if(best < 0)
+           {
+            best = i;
+            continue;
+           }
+         if(g_pos[i].closing != g_pos[best].closing)
+           {
+            if(!g_pos[i].closing)
+               best = i;
+            continue;
+           }
+         if(g_pos[i].openedMsc < g_pos[best].openedMsc ||
+            (g_pos[i].openedMsc == g_pos[best].openedMsc && g_pos[i].ticket < g_pos[best].ticket))
+            best = i;
+        }
+      used[best] = true;
+      order[k]   = best;
+     }
+   bool haveB = false;
+   bool haveS = false;
+   bool haveW = false;
+   for(int k = 0; k < n; k++)
+     {
+      int i = order[k];
+      int r = g_pos[i].role;
+      if(r == V11_ROLE_ANCHOR)
+        {
+         if(g_pos[i].dir > 0 && !haveB)
+           {
+            want[i] = V11_ROLE_ANCHOR;
+            haveB   = true;
+           }
+         else if(g_pos[i].dir < 0 && !haveS)
+           {
+            want[i] = V11_ROLE_ANCHOR;
+            haveS   = true;
+           }
+         else
+            want[i] = V11_ROLE_EXTRA;
+        }
+      else if(r == V11_ROLE_WORKER)
+        {
+         want[i] = (haveW ? V11_ROLE_EXTRA : V11_ROLE_WORKER);
+         haveW   = true;
+        }
+      else if(r == V11_ROLE_EXTRA)
+         want[i] = V11_ROLE_EXTRA;
+     }
+   for(int k = 0; k < n; k++)
+     {
+      int i = order[k];
+      if(want[i] != V11_ROLE_NONE)
+         continue;
+      if(g_pos[i].dir > 0 && !haveB)
+        {
+         want[i] = V11_ROLE_ANCHOR;
+         haveB   = true;
+        }
+      else if(g_pos[i].dir < 0 && !haveS)
+        {
+         want[i] = V11_ROLE_ANCHOR;
+         haveS   = true;
+        }
+      else if(!haveW)
+        {
+         want[i] = V11_ROLE_WORKER;
+         haveW   = true;
+        }
+      else
+         want[i] = V11_ROLE_EXTRA;
+     }
+   g_anchorB = -1;
+   g_anchorS = -1;
+   g_worker  = -1;
+   for(int i = 0; i < n; i++)
+     {
+      g_pos[i].role = want[i];
+      RememberRole(g_pos[i].ticket, want[i]);
+      if(g_pos[i].closing)
+         continue;
+      if(want[i] == V11_ROLE_ANCHOR)
+        {
+         if(g_pos[i].dir > 0)
+            g_anchorB = i;
+         else
+            g_anchorS = i;
+        }
+      else if(want[i] == V11_ROLE_WORKER)
+         g_worker = i;
+     }
+  }
+
+//--- a cycle runs from the first trade of an empty basket until the basket is empty again
+void UpdateCycle()
+  {
+   if(g_posCount > 0)
+     {
+      long first = 0;
+      for(int i = 0; i < g_posCount; i++)
+         if(first == 0 || (g_pos[i].openedMsc > 0 && g_pos[i].openedMsc < first))
+            first = g_pos[i].openedMsc;
+      if(!g_cycleActive)
+        {
+         g_cycleActive   = true;
+         g_cycleClosed   = 0.0;
+         g_cycleStartMsc = first;
+         g_stateDirty    = true;
+         V11Log(1, "CYCLE START: basket stop at a cycle result of -" + FmtMoney(InpBasketStop) + " (closed + open, after costs)");
+        }
+      else if(first > 0 && first < g_cycleStartMsc)
+        {
+         g_cycleStartMsc = first;          // an earlier fill of the start pair showed up late
+         g_stateDirty    = true;
+        }
+      return;
+     }
+   if(g_cycleActive && g_tr.kind == V11_TR_NONE)
+     {
+      V11Log(1, StringFormat("CYCLE END: the basket is empty (closed in the cycle so far %s)", FmtSigned(g_cycleClosed)));
+      g_cycleActive = false;
+      g_cycleClosed = 0.0;
+      g_stateDirty  = true;
+     }
+  }
+
 void ScanPositions()
   {
    ulong prev[V11_MAX_POS];
@@ -1723,6 +2053,9 @@ void ScanPositions()
       g_pos[g_posCount].tp      = PositionGetDouble(POSITION_TP);
       g_pos[g_posCount].net     = profit - CommRT(vol);
       g_pos[g_posCount].opened  = (datetime)PositionGetInteger(POSITION_TIME);
+      g_pos[g_posCount].openedMsc = PositionGetInteger(POSITION_TIME_MSC);
+      int role = RoleFromComment(PositionGetString(POSITION_COMMENT));
+      g_pos[g_posCount].role    = (role != V11_ROLE_NONE ? role : RecallRole(ticket));
       g_pos[g_posCount].closing = (closingTr && ticket == g_tr.closeTicket);
       if(!g_pos[g_posCount].closing)
         {
@@ -1737,6 +2070,7 @@ void ScanPositions()
    g_knownCount = g_posCount;
    for(int i = 0; i < g_posCount; i++)
       g_known[i] = g_pos[i].ticket;
+   AssignRoles();
    //--- a basket position that vanished without the EA closing it leaves a hole (gap meter)
    if(g_flattenMode != "")
      {
@@ -1752,18 +2086,18 @@ void ScanPositions()
       PushHole(ClockMs());
      }
    V11Plan fill;
-   FillPlan(g_nb, g_ns, g_bias, fill);
+   FillPlan(fill);
    TrimHoles((g_nb + g_ns == 0) ? 0 : fill.n);
   }
 
-//--- the trade to harvest: highest net at or above the harvest line
-int BestHarvest()
+//--- the trade to harvest: highest net at or above the harvest line ('skipAnchors': worker and extras only)
+int BestHarvest(const bool skipAnchors)
   {
    int    best = -1;
    double bnet = 0.0;
    for(int i = 0; i < g_posCount; i++)
      {
-      if(g_pos[i].closing)
+      if(g_pos[i].closing || (skipAnchors && g_pos[i].role == V11_ROLE_ANCHOR))
          continue;
       if(g_pos[i].net >= InpHarvestNet && (best < 0 || g_pos[i].net > bnet))
         {
@@ -1774,6 +2108,14 @@ int BestHarvest()
    return best;
   }
 
+//--- may the bank re-anchor this trade? Anchors yes; the worker only if InpReanchorAnchorsOnly = false
+bool ReanchorAllowed(const int i)
+  {
+   if(g_pos[i].role == V11_ROLE_ANCHOR)
+      return true;
+   return (g_pos[i].role == V11_ROLE_WORKER && !InpReanchorAnchorsOnly);
+  }
+
 //--- the stuck trade with the largest loss
 int WorstStuck()
   {
@@ -1781,7 +2123,7 @@ int WorstStuck()
    double wnet  = 0.0;
    for(int i = 0; i < g_posCount; i++)
      {
-      if(g_pos[i].closing)
+      if(g_pos[i].closing || !ReanchorAllowed(i))
          continue;
       if(g_pos[i].net <= -InpReanchorLoss && (worst < 0 || g_pos[i].net < wnet))
         {
@@ -1900,16 +2242,16 @@ void BackOff(const uint rc)
    V11Log(1, StringFormat("BACK-OFF %s: %s", FormatDuration((long)sec), reason));
   }
 
-//--- server stop and target for a new trade opened at 'price'
-void StopsFor(const int dir, const double price, double &sl, double &tp)
+//--- server stop and target for a new trade opened at 'price': the worker stop or the disaster stop
+void StopsFor(const int dir, const int role, const double price, double &sl, double &tp)
   {
-   double slPts = DisasterPts(g_lots);
+   double slPts = (role == V11_ROLE_WORKER ? WorkerStopPts(g_lots) : DisasterPts(g_lots));
    double tpPts = BackupTpPts(g_lots);
    sl = (slPts > 0.0 ? NormPrice(dir > 0 ? price - slPts * g_point : price + slPts * g_point) : 0.0);
    tp = (tpPts > 0.0 ? NormPrice(dir > 0 ? price + tpPts * g_point : price - tpPts * g_point) : 0.0);
   }
 
-bool BuildRequest(const bool isClose, const int dir, const ulong ticket, const string tag,
+bool BuildRequest(const bool isClose, const int dir, const int role, const ulong ticket, const string tag,
                   const ENUM_ORDER_TYPE_FILLING filling, MqlTradeRequest &req)
   {
    MqlTick t;
@@ -1921,7 +2263,7 @@ bool BuildRequest(const bool isClose, const int dir, const ulong ticket, const s
    req.magic        = (ulong)InpMagic;
    req.type_filling = filling;
    req.type_time    = ORDER_TIME_GTC;
-   req.comment      = InpComment + " " + tag;
+   req.comment      = InpComment + " " + tag + (isClose ? "" : "-" + RoleLetter(role));
    if(isClose)
      {
       if(!PositionSelectByTicket(ticket))
@@ -1942,7 +2284,7 @@ bool BuildRequest(const bool isClose, const int dir, const ulong ticket, const s
      {
       double sl = 0.0;
       double tp = 0.0;
-      StopsFor(dir, req.price, sl, tp);
+      StopsFor(dir, role, req.price, sl, tp);
       double lvl = (g_stopsLevel + 1) * g_point;
       if(sl > 0.0 && (dir > 0 ? t.bid - sl >= lvl : sl - t.ask >= lvl))
          req.sl = sl;
@@ -1953,7 +2295,7 @@ bool BuildRequest(const bool isClose, const int dir, const ulong ticket, const s
   }
 
 //--- send one market request. Sync: retried inline. Async: the result arrives in OnTradeTransaction.
-int Dispatch(const bool isClose, const int dir, const ulong ticket, const string tag,
+int Dispatch(const bool isClose, const int dir, const int role, const ulong ticket, const string tag,
              int &fillSwitches, int &attempts, uint &reqId, ulong &outTicket, uint &rc)
   {
    reqId     = 0;
@@ -1963,7 +2305,7 @@ int Dispatch(const bool isClose, const int dir, const ulong ticket, const string
      {
       MqlTradeRequest req;
       MqlTradeResult  res;
-      if(!BuildRequest(isClose, dir, ticket, tag, g_filling, req))
+      if(!BuildRequest(isClose, dir, role, ticket, tag, g_filling, req))
         {
          rc = (isClose ? TRADE_RETCODE_POSITION_CLOSED : TRADE_RETCODE_PRICE_OFF);
          return V11_SEND_FAIL;
@@ -2057,7 +2399,7 @@ bool ClosePositionNow(const ulong ticket, const string tag)
      {
       MqlTradeRequest req;
       MqlTradeResult  res;
-      if(!BuildRequest(true, 0, ticket, tag, g_filling, req))
+      if(!BuildRequest(true, 0, V11_ROLE_NONE, ticket, tag, g_filling, req))
          return !PositionSelectByTicket(ticket);
       ZeroMemory(res);
       NoteRequest();
@@ -2128,13 +2470,12 @@ void ProtectPositions()
   {
    if(!g_tradeEnabled || MarketQuiet())
       return;
-   //--- forget tickets that are gone or protected
+   //--- forget tickets that are gone (protected ones are forgotten below)
    for(int k = 0; k < V11_MAX_POS; k++)
      {
       if(g_nakedTicket[k] == 0)
          continue;
-      int p = FindPos(g_nakedTicket[k]);
-      if(p < 0 || g_pos[p].sl > 0.0)
+      if(FindPos(g_nakedTicket[k]) < 0)
          g_nakedTicket[k] = 0;
      }
    datetime now     = NowServer();
@@ -2142,24 +2483,36 @@ void ProtectPositions()
    double   lvl     = (g_stopsLevel + 1) * g_point;
    for(int i = 0; i < g_posCount; i++)
      {
-      bool needSl = (g_pos[i].sl <= 0.0);
-      bool needTp = (g_pos[i].tp <= 0.0);
-      if(!needSl && !needTp)
-         continue;
       double sl  = 0.0;
       double tp  = 0.0;
-      StopsFor(g_pos[i].dir, g_pos[i].open, sl, tp);
       int    dir = g_pos[i].dir;
-      bool   slOk = (sl > 0.0 && (dir > 0 ? g_last.bid - sl >= lvl : sl - g_last.ask >= lvl));
-      bool   tpOk = (tp > 0.0 && (dir > 0 ? tp - g_last.bid >= lvl : g_last.ask - tp >= lvl));
+      StopsFor(dir, g_pos[i].role, g_pos[i].open, sl, tp);
+      bool needSl = (g_pos[i].sl <= 0.0);
+      bool needTp = (g_pos[i].tp <= 0.0);
+      //--- the worker's server stop is never further away than the worker stop (e.g. a trade from build 1.1)
+      bool tighten = (!needSl && g_pos[i].role == V11_ROLE_WORKER && sl > 0.0 &&
+                      (dir > 0 ? g_pos[i].sl < sl - 0.5 * g_point : g_pos[i].sl > sl + 0.5 * g_point));
+      if(!needSl && !needTp && !tighten)
+        {
+         int k0 = NakedSlot(g_pos[i].ticket, false);
+         if(k0 >= 0)
+            g_nakedTicket[k0] = 0;
+         continue;
+        }
+      bool slOk = (sl > 0.0 && (dir > 0 ? g_last.bid - sl >= lvl : sl - g_last.ask >= lvl));
+      bool tpOk = (tp > 0.0 && (dir > 0 ? tp - g_last.bid >= lvl : g_last.ask - tp >= lvl));
       if(!needSl)
         {
-         //--- only the backup TP is missing: try every 5 s, never close for it
+         //--- the backup TP is missing or the worker stop is too wide: try every 5 s, never close for it
          int k = NakedSlot(g_pos[i].ticket, true);
-         if(k < 0 || !tpOk || (long)(now - g_nakedLastTry[k]) < 5)
+         if(k < 0 || (long)(now - g_nakedLastTry[k]) < 5)
+            continue;
+         double useSl = ((tighten && slOk) ? sl : g_pos[i].sl);
+         double useTp = (needTp ? (tpOk ? tp : 0.0) : g_pos[i].tp);
+         if(useSl == g_pos[i].sl && useTp == g_pos[i].tp)
             continue;
          g_nakedLastTry[k] = now;
-         if(SendSLTP(g_pos[i].ticket, g_pos[i].sl, tp))
+         if(SendSLTP(g_pos[i].ticket, useSl, useTp))
             changed = true;
          continue;
         }
@@ -2186,6 +2539,21 @@ void ProtectPositions()
      }
    if(changed)
       ScanPositions();
+  }
+
+//--- the worker's own stop, checked by the bot as well (its server SL is at the same net loss)
+void CheckWorkerStop()
+  {
+   if(!g_tradeEnabled || g_flattenMode != "" || MarketQuiet() || g_worker < 0)
+      return;
+   int w = g_worker;
+   if(g_pos[w].net > -InpWorkerStop)
+      return;
+   V11Log(1, StringFormat("WORKER STOP: %s #%I64u net %s (stop -%s) - closing it", DirName(g_pos[w].dir), g_pos[w].ticket,
+                          FmtSigned(g_pos[w].net), FmtMoney(InpWorkerStop)));
+   g_lastAction = StringFormat("WORKER STOP %s #%I64u net %s", DirName(g_pos[w].dir), g_pos[w].ticket, FmtSigned(g_pos[w].net));
+   ClosePositionNow(g_pos[w].ticket, "WS");
+   ScanPositions();
   }
 
 //+------------------------------------------------------------------+
@@ -2241,7 +2609,8 @@ void SendTrClose()
    uint   reqId = 0;
    ulong  out   = 0;
    uint   rc    = 0;
-   int    r     = Dispatch(true, 0, g_tr.closeTicket, tag, g_tr.closeFillSwitches, g_tr.closeAttempts, reqId, out, rc);
+   int    r     = Dispatch(true, 0, V11_ROLE_NONE, g_tr.closeTicket, tag, g_tr.closeFillSwitches, g_tr.closeAttempts,
+                           reqId, out, rc);
    if(r == V11_SEND_PENDING)
      {
       g_tr.closeState = V11_ST_SENT;
@@ -2264,7 +2633,7 @@ void SendTrOpen(const int i)
    uint  reqId = 0;
    ulong out   = 0;
    uint  rc    = 0;
-   int   r     = Dispatch(false, g_tr.open[i].dir, 0, OpenTag(g_tr.kind), g_tr.open[i].fillSwitches,
+   int   r     = Dispatch(false, g_tr.open[i].dir, g_tr.open[i].role, 0, OpenTag(g_tr.kind), g_tr.open[i].fillSwitches,
                           g_tr.open[i].attempts, reqId, out, rc);
    if(r == V11_SEND_PENDING)
      {
@@ -2351,7 +2720,7 @@ void FinishTransition()
    if(needHole && g_nb + g_ns > 0)
      {
       V11Plan fill;
-      FillPlan(g_nb, g_ns, g_bias, fill);
+      FillPlan(fill);
       if(fill.n > g_holeCount)
          PushHole(closeMsc);
      }
@@ -2539,6 +2908,7 @@ void StartTransition(const int kind, const ulong closeTicket, const double close
    for(int i = 0; i < g_tr.nOpen; i++)
      {
       g_tr.open[i].dir   = plan.dir[i];
+      g_tr.open[i].role  = plan.role[i];
       g_tr.open[i].state = V11_ST_TODO;
       if(kind == V11_TR_FILL)
          g_tr.open[i].holeMsc = PopHole();
@@ -2566,6 +2936,57 @@ void StartTransition(const int kind, const ulong closeTicket, const double close
   }
 
 //+------------------------------------------------------------------+
+//| Anchor reset: close the rest of the basket; a fresh cycle starts |
+//| when the normal entry filters allow (CheckProtection keeps it    |
+//| flat until then)                                                 |
+//+------------------------------------------------------------------+
+void StartReset(const string why)
+  {
+   if(g_resetMode)
+      return;
+   g_resetMode   = true;
+   g_resetReason = why;
+   g_stateDirty  = true;
+   g_lastAction  = "ANCHOR RESET: " + why;
+   V11Log(1, "ANCHOR RESET: " + why + " - closing the rest of the basket; nothing is reopened in this cycle.");
+  }
+
+//--- start the harvest of position 'h' if its refill can be sent (or it needs none). True when started.
+bool TryHarvest(const int h, const bool waiting)
+  {
+   string  why    = "";
+   int     dir    = g_pos[h].dir;
+   int     role   = g_pos[h].role;
+   ulong   ticket = g_pos[h].ticket;
+   double  net    = g_pos[h].net;
+   V11Plan refill;
+   RefillPlan(h, refill);
+   string  desc   = StringFormat("%s %s #%I64u net %s -> %s | %s", DirName(dir), RoleName(role), ticket, FmtSigned(net),
+                                 PlanText(refill), BiasName(g_bias));
+   if(refill.n == 0 || EntryGate(refill.n, (UseAsync() ? 0 : 1), why))
+     {
+      StartTransition(V11_TR_HARVEST, ticket, net, refill, desc);
+      return true;
+     }
+   if(role == V11_ROLE_ANCHOR && InpAnchorGuard)
+     {
+      g_nextText = StringFormat("%s anchor harvest waits until it can be refilled (%s); its backup TP stays on the server",
+                                DirName(dir), why);
+      return false;
+     }
+   if(!waiting)
+     {
+      V11Plan none;
+      none.n = 0;
+      StartTransition(V11_TR_HARVEST, ticket, net, none, StringFormat("%s %s #%I64u net %s, refill later (%s)",
+                      DirName(dir), RoleName(role), ticket, FmtSigned(net), why));
+      return true;
+     }
+   g_nextText = "harvest waits until the empty place is filled (" + why + "); the backup TP stays on the server";
+   return false;
+  }
+
+//+------------------------------------------------------------------+
 //| Planner: what the basket does next (spec sections 2, 5, 6)       |
 //+------------------------------------------------------------------+
 void PlanNext()
@@ -2588,60 +3009,55 @@ void PlanNext()
       g_nextText = "keep the basket flat: " + g_flattenMode;
       return;
      }
+   if(MarketQuiet())
+     {
+      g_nextText = "market closed (no quotes)";
+      return;
+     }
+   V11Plan fill;
+   FillPlan(fill);
+   //--- never leave an anchor alone (plan 3b, option B): a missing anchor that cannot be reopened now
+   //--- (entry filters, back-off, ...) closes the rest of the basket
+   if(InpAnchorGuard && g_posCount > 0 && fill.n > 0 && fill.role[0] == V11_ROLE_ANCHOR && !EntryGate(fill.n, 0, why))
+     {
+      StartReset(StringFormat("%s anchor is missing and cannot be reopened now (%s)", DirName(fill.dir[0]), why));
+      FlattenAll("AR");
+      return;
+     }
    datetime now = NowServer();
    if(now < g_execPauseUntil)
      {
       g_nextText = StringFormat("wait %s (back-off: %s)", FormatDuration((long)(g_execPauseUntil - now)), g_execPauseReason);
       return;
      }
-   if(MarketQuiet())
-     {
-      g_nextText = "market closed (no quotes)";
-      return;
-     }
-   //--- 1. fill: the start pair, a waiting place, or the third trade of the direction
-   V11Plan fill;
-   FillPlan(g_nb, g_ns, g_bias, fill);
+   //--- 1. fill: the start pair, a missing anchor, or the worker
    if(fill.n > 0)
      {
       if(EntryGate(fill.n, 0, why))
         {
-         string what = (g_nb + g_ns == 0 ? "start pair BUY + SELL" : "fill " + DirName(fill.dir[0]));
-         StartTransition(V11_TR_FILL, 0, 0.0, fill, StringFormat("%s | basket %s -> target %s (%s)", what,
-                         BasketText(g_nb, g_ns), TargetText(g_bias), BiasName(g_bias)));
+         string what = (g_posCount == 0 ? "start pair" : "open");
+         StartTransition(V11_TR_FILL, 0, 0.0, fill, StringFormat("%s %s | basket %s -> %s (%s)", what, PlanText(fill),
+                         BasketText(g_nb, g_ns), TargetText(), BiasName(g_bias)));
          return;
         }
      }
    bool waiting = (fill.n > 0 && g_nb + g_ns > 0);
    //--- 2. harvest: the trade with the highest net at or above the harvest line
-   int h = BestHarvest();
+   int h = BestHarvest(false);
    if(h >= 0)
      {
-      int     dir    = g_pos[h].dir;
-      int     nbA    = g_nb - (dir > 0 ? 1 : 0);
-      int     nsA    = g_ns - (dir < 0 ? 1 : 0);
-      ulong   ticket = g_pos[h].ticket;
-      double  net    = g_pos[h].net;
-      V11Plan refill;
-      RefillPlan(nbA, nsA, g_bias, refill);
-      string desc = StringFormat("%s #%I64u net %s -> %s | %s", DirName(dir), ticket, FmtSigned(net), PlanText(refill), BiasName(g_bias));
-      if(refill.n == 0 || EntryGate(refill.n, (UseAsync() ? 0 : 1), why))
-        {
-         StartTransition(V11_TR_HARVEST, ticket, net, refill, desc);
+      if(TryHarvest(h, waiting))
          return;
-        }
-      if(!waiting)
+      //--- option B: an anchor waits for its refill, but the worker may still harvest
+      if(g_pos[h].role == V11_ROLE_ANCHOR && InpAnchorGuard)
         {
-         V11Plan none;
-         none.n = 0;
-         StartTransition(V11_TR_HARVEST, ticket, net, none, StringFormat("%s #%I64u net %s, refill later (%s)",
-                         DirName(dir), ticket, FmtSigned(net), why));
-         return;
+         int hw = BestHarvest(true);
+         if(hw >= 0)
+            TryHarvest(hw, waiting);
         }
-      g_nextText = "harvest waits until the empty place is filled (" + why + "); the backup TP stays on the server";
       return;
      }
-   //--- 3. re-anchor: pay for the most stuck trade from the bank and reopen at the current price
+   //--- 3. re-anchor: pay for the most stuck anchor from the bank and reopen it at the current price
    if(InpUseReanchor && !waiting)
      {
       int w = WorstStuck();
@@ -2661,7 +3077,7 @@ void PlanNext()
            }
          int     dir = g_pos[w].dir;
          V11Plan refill;
-         RefillPlan(g_nb - (dir > 0 ? 1 : 0), g_ns - (dir < 0 ? 1 : 0), g_bias, refill);
+         RefillPlan(w, refill);
          if(EntryGate(refill.n, (UseAsync() ? 0 : 1), why))
            {
             StartTransition(V11_TR_REANCHOR, g_pos[w].ticket, g_pos[w].net, refill,
@@ -2674,7 +3090,7 @@ void PlanNext()
         }
      }
    if(waiting)
-      g_nextText = "waiting to fill " + DirName(fill.dir[0]) + ": " + g_gateReason;
+      g_nextText = "waiting to open " + PlanText(fill) + ": " + g_gateReason;
    else
       g_nextText = StringFormat("harvest each trade at net %s", FmtMoney(InpHarvestNet));
   }
@@ -2754,6 +3170,14 @@ void SaveState(const bool force)
    GvSet("kill", (g_haltKill ? 1.0 : 0.0));
    GvSet("haltday", (g_haltDay ? (double)g_haltDayKey : 0.0));
    GvSet("cool", (double)g_cooldownUntil);
+   GvSet("w_streak", (double)g_workerStreak);
+   GvSet("w_lock", (double)g_workerLock);
+   GvSet("w_paused", (g_workerPaused ? 1.0 : 0.0));
+   GvSet("w_wins", (double)g_paperWins);
+   GvSet("areset", (g_resetMode ? 1.0 : 0.0));
+   GvSet("cyc_on", (g_cycleActive ? 1.0 : 0.0));
+   GvSet("cyc_closed", g_cycleClosed);
+   GvSet("cyc_start", (double)g_cycleStartMsc);
    g_stateDirty = false;
    g_lastSave   = now;
   }
@@ -2783,6 +3207,28 @@ bool LoadState(ulong &lastDeal)
      }
    if(GvGet("cool", v))
       g_cooldownUntil = (datetime)(long)v;
+   if(GvGet("w_streak", v))
+      g_workerStreak = (int)v;
+   if(GvGet("w_lock", v))
+      g_workerLock = (int)v;
+   if(GvGet("w_paused", v))
+      g_workerPaused = (v > 0.5);
+   if(GvGet("w_wins", v))
+      g_paperWins = (int)v;
+   g_paperLock = g_workerLock;
+   if(GvGet("areset", v) && v > 0.5)
+     {
+      g_resetMode   = true;
+      g_resetReason = "anchor reset (started before the restart)";
+     }
+   if(GvGet("cyc_on", v) && v > 0.5)
+     {
+      g_cycleActive = true;
+      if(GvGet("cyc_closed", v))
+         g_cycleClosed = v;
+      if(GvGet("cyc_start", v))
+         g_cycleStartMsc = (long)v;
+     }
    return true;
   }
 
@@ -2816,14 +3262,23 @@ void CheckProtection()
       V11Log(1, "DAILY LOSS LIMIT: " + g_haltReason + " - basket closed, no trading until the next server day");
       CsvEvent("DAILY_LIMIT", 0, 0, dayNet, g_haltReason);
      }
-   double basket = BasketNet();
-   if(g_posCount > 0 && now >= g_cooldownUntil && basket <= -InpBasketStop)
+   double cycle = CycleNet();
+   if(g_posCount > 0 && now >= g_cooldownUntil && cycle <= -InpBasketStop)
      {
       g_cooldownUntil = now + InpBasketCooldownMin * 60;
       g_stateDirty    = true;
-      V11Log(1, StringFormat("BASKET STOP: open trades together at %s (limit -%s) - closing all, new cycle after %d min",
-                             FmtMoney(basket), FmtMoney(InpBasketStop), InpBasketCooldownMin));
-      CsvEvent("BASKET_STOP", 0, 0, basket, "open trades reached the basket stop");
+      V11Log(1, StringFormat("BASKET STOP: cycle result %s (closed %s + open %s, limit -%s) - closing all, new cycle after %d min",
+                             FmtSigned(cycle), FmtSigned(g_cycleClosed), FmtSigned(BasketNet()), FmtMoney(InpBasketStop),
+                             InpBasketCooldownMin));
+      CsvEvent("BASKET_STOP", 0, 0, cycle, "cycle result (closed + open, after costs) reached the basket stop");
+     }
+   if(g_resetMode && g_posCount == 0)
+     {
+      V11Log(1, "ANCHOR RESET done: the basket is empty. A fresh cycle starts when the entry filters allow.");
+      CsvEvent("ANCHOR_RESET", 0, 0, 0.0, g_resetReason + " - basket closed");
+      g_resetMode   = false;
+      g_resetReason = "";
+      g_stateDirty  = true;
      }
    string mode = "";
    string tag  = "";
@@ -2847,6 +3302,11 @@ void CheckProtection()
       mode = "Friday flatten (weekend)";
       tag  = "FF";
      }
+   else if(g_resetMode)
+     {
+      mode = "anchor reset: " + g_resetReason;
+      tag  = "AR";
+     }
    if(mode != "" && g_flattenMode == "")
       AbortTransition(mode);
    g_flattenMode = mode;
@@ -2865,7 +3325,7 @@ double DealMoney(const ulong deal)
 
 //--- everything about a position from its deals
 void PositionHistory(const ulong posId, double &net, double &comm, double &volIn, double &volOut, int &dir, bool &ours,
-                     ENUM_DEAL_REASON &lastReason, string &lastComment)
+                     ENUM_DEAL_REASON &lastReason, string &lastComment, string &inComment, long &inMsc)
   {
    net         = 0.0;
    comm        = 0.0;
@@ -2875,6 +3335,8 @@ void PositionHistory(const ulong posId, double &net, double &comm, double &volIn
    ours        = false;
    lastReason  = DEAL_REASON_CLIENT;
    lastComment = "";
+   inComment   = "";
+   inMsc       = 0;
    if(!HistorySelectByPosition((long)posId))
       return;
    int n = HistoryDealsTotal();
@@ -2890,6 +3352,11 @@ void PositionHistory(const ulong posId, double &net, double &comm, double &volIn
         {
          volIn += HistoryDealGetDouble(deal, DEAL_VOLUME);
          dir    = ((ENUM_DEAL_TYPE)HistoryDealGetInteger(deal, DEAL_TYPE) == DEAL_TYPE_BUY ? 1 : -1);
+         if(inMsc == 0)
+           {
+            inMsc     = HistoryDealGetInteger(deal, DEAL_TIME_MSC);
+            inComment = HistoryDealGetString(deal, DEAL_COMMENT);
+           }
          if(HistoryDealGetInteger(deal, DEAL_MAGIC) == InpMagic && HistoryDealGetString(deal, DEAL_SYMBOL) == _Symbol)
             ours = true;
         }
@@ -2902,12 +3369,26 @@ void PositionHistory(const ulong posId, double &net, double &comm, double &volIn
      }
   }
 
-string CloseReasonName(const ENUM_DEAL_REASON reason, const string comment, const ulong posId)
+//--- role of a closed position: from its opening comment (roles never change), else as remembered from the scans
+int ClosedRole(const ulong posId, const string inComment)
+  {
+   int r = RoleFromComment(inComment);
+   if(r == V11_ROLE_NONE)
+      r = RecallRole(posId);
+   return r;
+  }
+
+string CloseReasonName(const ENUM_DEAL_REASON reason, const string comment, const ulong posId, const int role, const double net)
   {
    if(reason == DEAL_REASON_TP)
       return "TP";                       // backup TP on the server: a harvest
    if(reason == DEAL_REASON_SL)
+     {
+      //--- the worker's server stop; an unknown role is judged by the size of the loss
+      if(role == V11_ROLE_WORKER || (role == V11_ROLE_NONE && net > -0.5 * InpDisasterLoss))
+         return "WORKER_STOP";
       return "DISASTER_SL";
+     }
    if(reason == DEAL_REASON_SO)
       return "STOP_OUT";
    if(reason == DEAL_REASON_EXPERT)
@@ -2922,15 +3403,52 @@ string CloseReasonName(const ENUM_DEAL_REASON reason, const string comment, cons
    return "OTHER";
   }
 
-//--- a basket trade is fully closed: bank, day counters, log, CSV
+//--- worker results: stop streak, same-direction wait, pause
+void WorkerClosed(const int dir, const bool harvest, const bool stopped, const bool replay)
+  {
+   if(harvest)
+     {
+      if(g_workerStreak > 0)
+         V11Log(1, StringFormat("Worker harvest: stop streak %d -> 0", g_workerStreak));
+      g_workerStreak = 0;
+      return;
+     }
+   if(!stopped)
+      return;
+   g_workerStreak++;
+   if(InpWorkerWaitReset)
+      g_workerLock = dir;
+   V11Log(1, StringFormat("%sWorker stop %d in a row%s", (replay ? "[while offline] " : ""), g_workerStreak,
+                          (InpWorkerWaitReset ? " | a new " + DirName(dir) + " worker waits until the Pulse leaves " +
+                           BiasName(dir) : "")));
+   if(InpWorkerPauseAfter > 0 && !g_workerPaused && g_workerStreak >= InpWorkerPauseAfter)
+     {
+      g_workerPaused = true;
+      g_paperDir     = 0;
+      g_paperWins    = 0;
+      g_paperLock    = g_workerLock;
+      V11Log(1, StringFormat("WORKER PAUSED after %d stops in a row. The anchors carry on; a paper worker runs, and the real worker returns after %d paper harvests in a row.",
+                             g_workerStreak, InpWorkerResumeAfter));
+      CsvEvent("WORKER_PAUSE", 0, dir, 0.0, StringFormat("%d worker stops in a row", g_workerStreak));
+     }
+  }
+
+//--- a basket trade is fully closed: bank, cycle, worker, anchor reset, day counters, log, CSV
 void OnPositionClosed(const ulong posId, const int dir, const double net, const double comm, const double volIn,
-                      const string reasonName, const bool today, const bool replay)
+                      const string reasonName, const bool today, const bool replay, const int role, const long inMsc)
   {
    bool   harvest  = (reasonName == "HARVEST" || reasonName == "TP");
    bool   reanchor = (reasonName == "REANCHOR");
    double before   = g_bank;
    g_bank       = MathMax(0.0, g_bank + net);
    g_stateDirty = true;
+   if(g_cycleActive && (inMsc == 0 || inMsc >= g_cycleStartMsc))
+      g_cycleClosed += net;
+   if(role == V11_ROLE_WORKER)
+      WorkerClosed(dir, harvest, (reasonName == "WORKER_STOP"), replay);
+   if((role == V11_ROLE_ANCHOR || role == V11_ROLE_NONE) && (reasonName == "DISASTER_SL" || reasonName == "STOP_OUT"))
+      StartReset(StringFormat("%s anchor #%I64u closed by its %s (net %s)", DirName(dir), posId,
+                              (reasonName == "STOP_OUT" ? "broker stop-out" : "disaster stop"), FmtSigned(net)));
    if(today)
      {
       g_closesToday++;
@@ -2957,12 +3475,12 @@ void OnPositionClosed(const ulong posId, const int dir, const double net, const 
      }
    string ev = (harvest ? "HARVEST" : (reanchor ? "REANCHOR" : "CLOSE"));
    if(!replay)
-      g_lastAction = StringFormat("%s %s #%I64u net %s (%s)", ev, DirName(dir), posId, FmtSigned(net), reasonName);
-   V11Log(1, StringFormat("%s%s %s #%I64u net %s (%s) | bank %s -> %s | today: %d harvests %s, %d re-anchors %s",
-                          (replay ? "[while offline] " : ""), ev, DirName(dir), posId, FmtSigned(net), reasonName,
+      g_lastAction = StringFormat("%s %s %s #%I64u net %s (%s)", ev, DirName(dir), RoleName(role), posId, FmtSigned(net), reasonName);
+   V11Log(1, StringFormat("%s%s %s %s #%I64u net %s (%s) | bank %s -> %s | today: %d harvests %s, %d re-anchors %s",
+                          (replay ? "[while offline] " : ""), ev, DirName(dir), RoleName(role), posId, FmtSigned(net), reasonName,
                           FmtMoney(before), FmtMoney(g_bank), g_harvestsToday, FmtSigned(g_harvestNetToday),
                           g_reanchorsToday, FmtSigned(g_reanchorNetToday)));
-   CsvEvent(ev, posId, dir, net, reasonName);
+   CsvEvent(ev, posId, dir, net, reasonName + " " + RoleName(role));
    if(g_tr.kind != V11_TR_NONE && posId == g_tr.closeTicket &&
       (g_tr.closeState == V11_ST_SENT || g_tr.closeState == V11_ST_ACCEPTED))
      {
@@ -3065,12 +3583,15 @@ void StartHistory(const datetime now, const bool haveState, const ulong lastDeal
       bool             ours   = false;
       ENUM_DEAL_REASON rsn    = DEAL_REASON_CLIENT;
       string           cmt    = "";
-      PositionHistory(pos, net, comm, volIn, volOut, dir, ours, rsn, cmt);
-      string why      = CloseReasonName(rsn, cmt, pos);
+      string           inCmt  = "";
+      long             inMsc  = 0;
+      PositionHistory(pos, net, comm, volIn, volOut, dir, ours, rsn, cmt, inCmt, inMsc);
+      int    role     = ClosedRole(pos, inCmt);
+      string why      = CloseReasonName(rsn, cmt, pos, role, net);
       bool   today    = (closeTime >= g_dayStart);
       bool   catchUp  = (haveState && lastExit > lastDeal);
       if(catchUp)
-         OnPositionClosed(pos, dir, net, comm, volIn, why, today, true);
+         OnPositionClosed(pos, dir, net, comm, volIn, why, today, true, role, inMsc);
       else if(today)
         {
          g_closesToday++;
@@ -3225,9 +3746,9 @@ void UpdatePanel(const bool force)
    if(g_p.ready)
      {
       string cand = (g_candCount > 0 ? StringFormat("   |   next: %s %d/%d", BiasName(g_candidate), g_candCount, InpPulseConfirmBars) : "");
-      PanelLine(2, StringFormat("PULSE %-7s for %s   |   score %+.0f   [UP >= +%.0f, DOWN <= -%.0f, NEUTRAL within +/-%.0f]%s",
+      PanelLine(2, StringFormat("PULSE %-7s for %s   |   score %+.0f   [UP >= +%.0f, DOWN <= -%.0f; UP ends below +%.0f, DOWN above -%.0f]%s",
                                 BiasName(g_bias), FormatDuration((long)(now - g_biasSince)), g_p.score, InpPulseOn, InpPulseOn,
-                                InpPulseOff, cand), BiasColor(g_bias));
+                                InpPulseOff, InpPulseOff, cand), BiasColor(g_bias));
       PanelLine(3, StringFormat("      trend %+.2f   EMA %+.2f   structure %+.2f   efficiency %+.2f   |   ATR(M1) %.0f pts",
                                 g_p.t, g_p.e, g_p.s, g_p.m, g_p.atrPts), clrSilver);
      }
@@ -3239,16 +3760,18 @@ void UpdatePanel(const bool force)
 
    //--- basket and its trades
    string busy = (g_tr.kind != V11_TR_NONE ? "   |   " + TrKindName(g_tr.kind) + " in progress" : "");
-   PanelLine(4, StringFormat("BASKET %s   |   target %s   |   open net %s%s", BasketText(g_nb, g_ns), TargetText(g_bias),
-                             FmtSigned(BasketNet()), busy), clrWhite);
+   PanelLine(4, StringFormat("BASKET %s   |   target %s   |   open net %s   |   cycle %s%s", BasketText(g_nb, g_ns), TargetText(),
+                             FmtSigned(BasketNet()), FmtSigned(CycleNet()), busy), clrWhite);
    for(int r = 0; r < 3; r++)
      {
       if(r < g_posCount)
         {
          double toLine = InpHarvestNet - g_pos[r].net;
-         string role   = (g_bias == 0 ? "" : (g_pos[r].dir == g_bias ? "   with the trend" : "   against the trend"));
+         string role   = "   " + RoleName(g_pos[r].role);
+         if(g_pos[r].role == V11_ROLE_WORKER)
+            role += StringFormat(" (stop -%s)", FmtMoney(InpWorkerStop));
          string extra  = (g_pos[r].closing ? "   [closing]" : "");
-         if(g_pos[r].net <= -InpReanchorLoss)
+         if(g_pos[r].net <= -InpReanchorLoss && ReanchorAllowed(r))
             extra += "   [stuck]";
          PanelLine(5 + r, StringFormat("  %-4s #%I64u @ %s   net %s   %s   age %s%s%s", DirName(g_pos[r].dir), g_pos[r].ticket,
                                        FmtPrice(g_pos[r].open), FmtSigned(g_pos[r].net),
@@ -3274,31 +3797,115 @@ void UpdatePanel(const bool force)
                              g_harvestsToday, FmtSigned(g_harvestNetToday), g_reanchorsToday, FmtSigned(g_reanchorNetToday),
                              FmtSigned(g_realizedToday), FmtSigned(DayNet()), FmtMoney(InpDailyLossLimit)),
              (DayNet() >= 0.0 ? clrLime : clrTomato));
+   //--- worker
+   string wk = StringFormat("WORKER stop -%s   |   stops in a row %d", FmtMoney(InpWorkerStop), g_workerStreak);
+   if(InpWorkerPauseAfter > 0)
+      wk += StringFormat(" (pause at %d)", InpWorkerPauseAfter);
+   if(g_workerPaused)
+     {
+      wk += StringFormat("   |   PAUSED: paper harvests %d/%d", g_paperWins, InpWorkerResumeAfter);
+      if(g_paperDir != 0)
+         wk += StringFormat(", paper %s @ %s net %s", DirName(g_paperDir), FmtPrice(g_paperOpen),
+                            FmtSigned(PaperNet(g_paperDir > 0 ? g_last.bid : g_last.ask)));
+     }
+   else if(g_workerLock != 0)
+      wk += "   |   a new " + DirName(g_workerLock) + " worker waits until the Pulse leaves " + BiasName(g_workerLock);
+   PanelLine(10, wk, (g_workerPaused ? clrOrange : clrSilver));
    double avg = (g_gapCount > 0 ? g_gapSumMs / g_gapCount : 0.0);
-   PanelLine(10, StringFormat("GAP (empty place before refill)   last %s   |   average %.0f ms   |   max %.0f ms   |   refills %d",
+   PanelLine(11, StringFormat("GAP (empty place before refill)   last %s   |   average %.0f ms   |   max %.0f ms   |   refills %d",
                               (g_gapLastMs >= 0.0 ? StringFormat("%.0f ms", g_gapLastMs) : "-"), avg, g_gapMaxMs, g_gapCount), clrSilver);
 
    //--- gate, next step, protection, news, last action, account
-   PanelLine(11, (g_gateOpen ? "ENTRY GATE open" : "ENTRY GATE closed - " + g_gateReason), (g_gateOpen ? clrLime : clrOrange));
-   PanelLine(12, "NEXT " + g_nextText, clrWhite);
-   string prot = StringFormat("PROTECTION basket stop -%s (now %s)   |   disaster stop %s per trade", FmtMoney(InpBasketStop),
+   PanelLine(12, (g_gateOpen ? "ENTRY GATE open" : "ENTRY GATE closed - " + g_gateReason), (g_gateOpen ? clrLime : clrOrange));
+   PanelLine(13, "NEXT " + g_nextText, clrWhite);
+   string prot = StringFormat("PROTECTION basket stop -%s on the cycle (now %s = closed %s + open %s)   |   anchor disaster stop %s closes the basket",
+                              FmtMoney(InpBasketStop), FmtSigned(CycleNet()), FmtSigned(g_cycleActive ? g_cycleClosed : 0.0),
                               FmtSigned(BasketNet()), FmtMoney(InpDisasterLoss));
    if(g_flattenMode != "")
       prot = "FLAT: " + g_flattenMode;
-   PanelLine(13, prot, (g_flattenMode != "" ? clrOrange : clrSilver));
+   PanelLine(14, prot, (g_flattenMode != "" ? clrOrange : clrSilver));
    string nw = "";
    if(NewsWindow(now, nw))
-      PanelLine(14, "NEWS WINDOW: " + nw, clrOrange);
+      PanelLine(15, "NEWS WINDOW: " + nw, clrOrange);
    else
-      PanelLine(14, "News: " + g_newsStatus + (g_newsCount > 0 ? "   |   " + NextNewsText(now) : ""), clrSilver);
-   PanelLine(15, "LAST " + g_lastAction, clrSilver);
+      PanelLine(15, "News: " + g_newsStatus + (g_newsCount > 0 ? "   |   " + NextNewsText(now) : ""), clrSilver);
+   PanelLine(16, "LAST " + g_lastAction, clrSilver);
    double ml = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
-   PanelLine(16, StringFormat("ACCOUNT %s   equity %s (peak %s, kill at -%.0f%%)   |   margin level %s   |   commission %s/lot RT   |   magic %I64d",
+   PanelLine(17, StringFormat("ACCOUNT %s   equity %s (peak %s, kill at -%.0f%%)   |   margin level %s   |   commission %s/lot RT   |   magic %I64d",
                               g_ccy, FmtMoney(AccountInfoDouble(ACCOUNT_EQUITY)), FmtMoney(g_peakEquity), InpEquityKillPct,
                               (ml > 0.0 ? StringFormat("%.0f%%", ml) : "-"), FmtMoney(g_commPerLotRT), InpMagic), clrGray);
-   PanelLine(17, StringFormat("Harvest at net %s   |   backup TP %s   |   lot %.2f   |   CSV %s", FmtMoney(InpHarvestNet),
-                              FmtMoney(InpBackupTpNet), g_lots, (g_csvOk ? g_csvName : "off")), clrGray);
+   PanelLine(18, StringFormat("Harvest at net %s   |   backup TP %s   |   lot %.2f   |   anchor guard %s   |   CSV %s", FmtMoney(InpHarvestNet),
+                              FmtMoney(InpBackupTpNet), g_lots, (InpAnchorGuard ? "on" : "off"), (g_csvOk ? g_csvName : "off")), clrGray);
    ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+//| Worker pause: paper worker and the same-direction wait           |
+//+------------------------------------------------------------------+
+void ResumeWorker()
+  {
+   V11Log(1, StringFormat("WORKER RESUMED after %d paper harvests in a row.", g_paperWins));
+   CsvEvent("WORKER_RESUME", 0, 0, 0.0, StringFormat("%d paper harvests in a row", g_paperWins));
+   g_workerPaused = false;
+   g_workerStreak = 0;
+   g_workerLock   = 0;
+   g_paperDir     = 0;
+   g_paperWins    = 0;
+   g_paperLock    = 0;
+   g_stateDirty   = true;
+  }
+
+//--- the wait after a worker stop ends once the Pulse has left that direction
+void ReleaseWorkerLocks()
+  {
+   if(g_workerLock != 0 && g_bias != g_workerLock)
+     {
+      V11Log(1, StringFormat("Worker wait over: the Pulse has left %s (now %s).", BiasName(g_workerLock), BiasName(g_bias)));
+      g_workerLock = 0;
+      g_stateDirty = true;
+     }
+   if(g_paperLock != 0 && g_bias != g_paperLock)
+      g_paperLock = 0;
+  }
+
+//--- while the worker is paused: a paper worker with the real worker's rules, on real prices
+void ServicePaper()
+  {
+   if(!g_workerPaused || !g_haveTick)
+      return;
+   if(g_paperDir != 0)
+     {
+      double net = PaperNet(g_paperDir > 0 ? g_last.bid : g_last.ask);
+      if(net >= InpHarvestNet)
+        {
+         g_paperWins++;
+         g_stateDirty = true;
+         V11Log(1, StringFormat("Paper worker harvest %d/%d: %s net %s", g_paperWins, InpWorkerResumeAfter,
+                                DirName(g_paperDir), FmtSigned(net)));
+         g_paperDir = 0;
+         if(g_paperWins >= InpWorkerResumeAfter)
+           {
+            ResumeWorker();
+            return;
+           }
+        }
+      else if(net <= -InpWorkerStop)
+        {
+         V11Log(1, StringFormat("Paper worker stop: %s net %s - paper harvests back to 0", DirName(g_paperDir), FmtSigned(net)));
+         g_paperWins  = 0;
+         g_paperLock  = (InpWorkerWaitReset ? g_paperDir : 0);
+         g_paperDir   = 0;
+         g_stateDirty = true;
+        }
+     }
+   if(g_paperDir != 0 || g_bias == 0 || g_bias == g_paperLock)
+      return;
+   string why = "";
+   if(!MarketFiltersOpen(why))
+      return;
+   g_paperDir  = g_bias;
+   g_paperOpen = (g_bias > 0 ? g_last.ask : g_last.bid);
+   V11Log(2, StringFormat("Paper worker opens %s @ %s", DirName(g_paperDir), FmtPrice(g_paperOpen)));
   }
 
 //+------------------------------------------------------------------+
@@ -3310,11 +3917,15 @@ void Drive()
    CheckDayRollover(now);
    SampleSpread();
    UpdatePulse();
+   ReleaseWorkerLocks();
    CheckShock();
    RefreshNews(false);
    ScanPositions();
+   UpdateCycle();
    ProtectPositions();
    CheckProtection();
+   CheckWorkerStop();
+   ServicePaper();
    ServiceTransition();
    if(g_tr.kind == V11_TR_NONE)
       PlanNext();
@@ -3358,10 +3969,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    bool             ours   = (magic == InpMagic);
    ENUM_DEAL_REASON rsn    = DEAL_REASON_CLIENT;
    string           cmt    = "";
+   string           inCmt  = "";
+   long             inMsc  = 0;
    if(isOut)
      {
       bool entryOurs = false;
-      PositionHistory(posId, net, comm, volIn, volOut, dir, entryOurs, rsn, cmt);
+      PositionHistory(posId, net, comm, volIn, volOut, dir, entryOurs, rsn, cmt, inCmt, inMsc);
       ours = (ours || entryOurs);        // e.g. closed by hand: that deal carries no magic
      }
    if(!ours)
@@ -3371,7 +3984,11 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    if(dt >= g_dayStart)
       g_realizedToday += money;
    if(isOut && volIn > 0.0 && volOut >= volIn - 1e-9)
-      OnPositionClosed(posId, dir, net, comm, volIn, CloseReasonName(rsn, cmt, posId), (dt >= g_dayStart), false);
+     {
+      int role = ClosedRole(posId, inCmt);
+      OnPositionClosed(posId, dir, net, comm, volIn, CloseReasonName(rsn, cmt, posId, role, net), (dt >= g_dayStart), false,
+                       role, inMsc);
+     }
    Drive();                              // react at once: confirm the swap, refill a place
   }
 
@@ -3471,15 +4088,22 @@ int OnInit()
                           V11_BUILD, _Symbol, (isReal ? "REAL" : "demo/contest"), (g_isHedging ? "hedging" : "netting"),
                           g_ccy, FmtMoney(equity), FmtMoney(g_bank), (haveState ? " (restored)" : "")));
    if(g_tradeEnabled)
-      V11Log(1, StringFormat("TRADING ENABLED (%s). Every trade carries a disaster stop (%s) and a backup TP (net %s) on the server.",
-                             (UseAsync() ? "async swaps" : "sync swaps"), FmtMoney(InpDisasterLoss), FmtMoney(InpBackupTpNet)));
+      V11Log(1, StringFormat("TRADING ENABLED (%s). On the server: anchors carry a disaster stop (%s), the worker its stop (%s), every trade a backup TP (net %s).",
+                             (UseAsync() ? "async swaps" : "sync swaps"), FmtMoney(InpDisasterLoss), FmtMoney(InpWorkerStop),
+                             FmtMoney(InpBackupTpNet)));
    else
       V11Log(1, "NO ORDERS: " + g_tradeBlockMsg + ".");
-   V11Log(1, StringFormat("Basket: UP = 2 BUY + 1 SELL, DOWN = 1 BUY + 2 SELL, NEUTRAL = 1 BUY + 1 SELL | harvest at net %s | lot %.2f | re-anchor %s at loss %s (keep %s)",
-                          FmtMoney(InpHarvestNet), g_lots, (InpUseReanchor ? "on" : "off"), FmtMoney(InpReanchorLoss), FmtMoney(InpBankKeep)));
-   V11Log(1, StringFormat("Protection: basket stop %s (cooldown %d min) | daily limit %s | kill switch -%.0f%% | Friday last entry %s, flatten %s",
-                          FmtMoney(InpBasketStop), InpBasketCooldownMin, FmtMoney(InpDailyLossLimit), InpEquityKillPct,
-                          MinToHHMM(g_fridayLastMin), MinToHHMM(g_fridayFlattenMin)));
+   V11Log(1, StringFormat("Basket: BUY anchor + SELL anchor always, worker in the Pulse direction (none in NEUTRAL) | harvest at net %s | lot %.2f | re-anchor %s at loss %s (keep %s, %s)",
+                          FmtMoney(InpHarvestNet), g_lots, (InpUseReanchor ? "on" : "off"), FmtMoney(InpReanchorLoss), FmtMoney(InpBankKeep),
+                          (InpReanchorAnchorsOnly ? "anchors only" : "anchors and worker")));
+   V11Log(1, StringFormat("Worker: stop %s | same direction waits for a Pulse reset: %s | pause after %d stops in a row, resume after %d paper harvests | worker %s",
+                          FmtMoney(InpWorkerStop), (InpWorkerWaitReset ? "yes" : "no"), InpWorkerPauseAfter, InpWorkerResumeAfter,
+                          (g_workerPaused ? StringFormat("PAUSED (paper %d/%d)", g_paperWins, InpWorkerResumeAfter) : "active")));
+   V11Log(1, StringFormat("Protection: basket stop %s on the cycle result (cooldown %d min) | anchor disaster stop closes the basket | anchor guard %s | daily limit %s | kill switch -%.0f%% | Friday last entry %s, flatten %s",
+                          FmtMoney(InpBasketStop), InpBasketCooldownMin, (InpAnchorGuard ? "on" : "off"), FmtMoney(InpDailyLossLimit),
+                          InpEquityKillPct, MinToHHMM(g_fridayLastMin), MinToHHMM(g_fridayFlattenMin)));
+   if(g_resetMode)
+      V11Log(1, "Anchor reset still in progress from before the restart: the basket will be closed.");
    if(g_isTester)
       V11Log(1, "Strategy Tester: swaps are sent synchronously and the news filter is skipped.");
 
