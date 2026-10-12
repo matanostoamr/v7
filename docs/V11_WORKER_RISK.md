@@ -1,5 +1,7 @@
 # v11: worker-এর ঝুঁকি (পর্যবেক্ষণ ও প্রস্তাব)
 
+> **Updated:** your decisions replaced some ideas here (no 30-minute pause, basket stop −£40 on the cycle P&L, harvest £0.50 for all trades). The current plan is [V11_BUILD_1.2_PLAN.md](V11_BUILD_1.2_PLAN.md).
+>
 > এখানে শুধু মতামত। কোড বদলায়নি, এখনো build 1.1। আপনার সিদ্ধান্তের পরে build 1.2 হবে।
 > ভিত্তি: আপনার backtest (XAUUSD, Oct 1–7 2026, net −£98.24, 594 trade)।
 
