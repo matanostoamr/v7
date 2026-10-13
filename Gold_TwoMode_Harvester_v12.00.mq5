@@ -1,15 +1,21 @@
 //+------------------------------------------------------------------+
 //|                                Gold_TwoMode_Harvester_v12.00.mq5 |
-//|  v12 Two-Mode Harvester - build 1.0                              |
-//|  Design: docs/V12_PLAN.md (approved with all defaults)           |
+//|  v12 Two-Mode Harvester - build 1.1                              |
+//|  Design: docs/V12_PLAN.md (approved with all defaults);          |
+//|  build 1.1 = section 9 (approved with all defaults)              |
 //+------------------------------------------------------------------+
 //  Three slots, always refilled to the same shape:
 //    BUY slot   - always BUY                        comment "V12 B"
 //    SELL slot  - always SELL                       comment "V12 S"
 //    third slot - the market direction when opened  comment "V12 T"
 //  Every trade is closed (harvested) when its own net result reaches
-//  InpHarvestNet and its slot is refilled at once. A losing trade is
-//  never closed on its own.
+//  InpHarvestNet (Harvest Mode) or InpRecoveryHarvestNet (Recovery
+//  Mode) and its slot is refilled at once. A losing BUY or SELL trade
+//  is never closed on its own.
+//  Build 1.1, Recovery Mode only: when the EMA signal (last closed M5
+//  bar) is against the third trade, only the third trade is closed
+//  (comment "V12 TF"); once MT5 confirms the close, a new third trade
+//  opens in the signal direction. Its result stays in R (no reset).
 //
 //  R = banked: all money of this cycle's deals (profits, losses,
 //      opening and closing commissions, swaps).
@@ -28,9 +34,9 @@
 #property version     "12.00"
 #property description "v12 Two-Mode Harvester: BUY slot + SELL slot + third slot in the market direction."
 #property description "Harvest Mode banks the first 5.00; Recovery Mode earns a fund that pays for closing the rest."
-#property description "Hard stop: the whole cycle at -30.00. No other features."
+#property description "Hard stop: the whole cycle at -30.00. Build 1.1: in Recovery Mode the third trade follows the EMA."
 
-#define V12_BUILD          "1.0"
+#define V12_BUILD          "1.1"
 #define V12_SLOT_BUY       0
 #define V12_SLOT_SELL      1
 #define V12_SLOT_THIRD     2
@@ -44,14 +50,15 @@
 #define V12_CLOSE_RETRY_MS 1000
 #define V12_MISSING_MS     60000
 
-//--- inputs: this is the complete list (docs/V12_PLAN.md, section 8)
-input double InpLots        = 0.01;     // Lot size (all three trades)
-input double InpHarvestNet  = 0.50;     // Harvest a trade at this net (after its commission and swap)
-input double InpCycleTarget = 5.00;     // Harvest Mode: bank this much, then Recovery Mode
-input double InpHardStop    = 30.00;    // Hard stop: whole-cycle loss (banked + open, after costs)
-input int    InpEmaFast     = 9;        // Third-trade direction: fast EMA (closed M5 bars)
-input int    InpEmaSlow     = 21;       // Third-trade direction: slow EMA (closed M5 bars)
-input long   InpMagic       = 120001;   // Magic number
+//--- inputs: this is the complete list (docs/V12_PLAN.md, sections 8 and 9.3)
+input double InpLots               = 0.01;     // Lot size (all three trades)
+input double InpHarvestNet         = 0.50;     // Harvest Mode: harvest a trade at this net (after its commission and swap)
+input double InpRecoveryHarvestNet = 0.50;     // Recovery Mode: harvest a trade at this net (0.50 = same as Harvest Mode)
+input double InpCycleTarget        = 5.00;     // Harvest Mode: bank this much, then Recovery Mode
+input double InpHardStop           = 30.00;    // Hard stop: whole-cycle loss (banked + open, after costs)
+input int    InpEmaFast            = 9;        // Third-trade direction: fast EMA (closed M5 bars)
+input int    InpEmaSlow            = 21;       // Third-trade direction: slow EMA (closed M5 bars)
+input long   InpMagic              = 120001;   // Magic number
 
 //+------------------------------------------------------------------+
 //| State                                                            |
@@ -82,6 +89,7 @@ int      g_cycleNo        = 0;
 datetime g_cycleStart     = 0;
 ulong    g_cycleFirstDeal = 0;       // first deal of this cycle (restart safety)
 int      g_harvests       = 0;       // harvests in this cycle
+int      g_flips          = 0;       // third-trade flips in this cycle (Recovery Mode)
 int      g_opened         = 0;       // trades opened in this cycle
 double   g_trigR          = 0.0;     // banked at the close-all trigger (journal)
 double   g_trigC          = 0.0;     // close-all value at the trigger (journal)
@@ -195,10 +203,11 @@ int OpenCount()
    return n;
   }
 
+//--- every tracked trade (open, or closed but not yet confirmed in the history) has its opening money read
 bool AllEntriesKnown()
   {
    for(int i = 0; i < g_posCount; i++)
-      if(g_pos[i].isOpen && !g_pos[i].entryKnown)
+      if(!g_pos[i].entryKnown)
          return false;
    return true;
   }
@@ -376,13 +385,14 @@ double CloseValue(const int i)
    return FloorCent(g_pos[i].profit) + g_pos[i].swapNow + g_pos[i].entryMoney;
   }
 
-//--- C: the close-all value of every open trade
+//--- C: the close-all value of every tracked trade. A trade that has just been closed but is not yet
+//--- confirmed in the history keeps its last value here until its real result is booked into R, so a
+//--- loss (e.g. a third-trade flip) is never missing from R + C - not even for one tick.
 double CloseAllValue()
   {
    double c = 0.0;
    for(int i = 0; i < g_posCount; i++)
-      if(g_pos[i].isOpen)
-         c += CloseValue(i);
+      c += CloseValue(i);
    return c;
   }
 
@@ -536,6 +546,7 @@ void StartCycle()
    g_cycleStart     = TimeCurrent();
    g_cycleFirstDeal = 0;
    g_harvests       = 0;
+   g_flips          = 0;
    g_opened         = 0;
    g_trigR          = 0.0;
    g_trigC          = 0.0;
@@ -545,16 +556,23 @@ void StartCycle()
    g_dirty = true;
   }
 
-//--- step 5: harvest every trade whose own net has reached the target
+//--- the harvest target of the current mode (docs/V12_PLAN.md, section 9.3)
+double HarvestTarget()
+  {
+   return (g_mode == V12_MODE_RECOVERY ? InpRecoveryHarvestNet : InpHarvestNet);
+  }
+
+//--- step 5: harvest every trade whose own net has reached the target of the current mode
 void Harvest()
   {
    if(g_nowMsc < g_closeNextTry)
       return;
-   bool acted  = false;
-   bool failed = false;
+   double target = HarvestTarget();
+   bool   acted  = false;
+   bool   failed = false;
    for(int i = 0; i < g_posCount; i++)
      {
-      if(!g_pos[i].isOpen || !g_pos[i].entryKnown || TradeNet(i) < InpHarvestNet - V12_EPS)
+      if(!g_pos[i].isOpen || !g_pos[i].entryKnown || TradeNet(i) < target - V12_EPS)
          continue;
       acted = true;
       if(ClosePosition(i, "HV"))
@@ -566,6 +584,46 @@ void Harvest()
       g_closeNextTry = g_nowMsc + V12_CLOSE_RETRY_MS;
    if(acted)
       Sync();
+  }
+
+//--- step 5b (Recovery Mode only, docs/V12_PLAN.md section 9.2): the EMA signal on the last closed
+//--- M5 bar is against the open third trade -> close only the third trade (also in a small profit).
+//--- Its slot stays taken until MT5 confirms the close in the history (Sync); only then does step 7
+//--- open the new third trade in the signal direction. Its result goes into R: nothing is reset.
+//--- Returns true when the third trade was closed on this tick.
+bool FollowDirection()
+  {
+   if(g_nowMsc < g_closeNextTry)
+      return false;
+   int dir = MarketDirection();
+   if(dir == 0)
+      return false;                       // the EMAs are not ready yet
+   for(int i = 0; i < g_posCount; i++)
+     {
+      if(g_pos[i].slot != V12_SLOT_THIRD || !g_pos[i].isOpen || g_pos[i].dir == dir)
+         continue;
+      ulong  ticket   = g_pos[i].ticket;
+      int    oldDir   = g_pos[i].dir;
+      double estimate = TradeNet(i);
+      if(!ClosePosition(i, "TF"))
+        {
+         g_closeNextTry = g_nowMsc + V12_CLOSE_RETRY_MS;
+         return false;
+        }
+      g_flips++;
+      g_dirty = true;
+      double net       = 0.0;
+      bool   confirmed = ClosedResult(ticket, net);
+      Sync();
+      if(confirmed)
+         V12Log(StringFormat("CYCLE #%d T FLIP %s->%s net %s | fund now %s",
+                             g_cycleNo, DirName(oldDir), DirName(dir), Money(net), Money(Banked() - g_P)));
+      else
+         V12Log(StringFormat("CYCLE #%d T FLIP %s->%s net about %s | waiting for MT5 to confirm the close before the new third trade opens",
+                             g_cycleNo, DirName(oldDir), DirName(dir), Money(estimate)));
+      return true;
+     }
+   return false;
   }
 
 //--- step 6: Harvest Mode has banked its target -> Recovery Mode
@@ -596,8 +654,8 @@ void FinishCycle()
                            Money(g_P), Money(g_trigR - g_P), Money(g_trigC));
    else
       parts = StringFormat("Harvest Mode: banked %s, close-all value %s at the trigger", Money(g_trigR), Money(g_trigC));
-   V12Log(StringFormat("CYCLE #%d END - %s: result %s | %s | %d harvests, %d trades opened | %s -> %s",
-                       g_cycleNo, why, Money(result), parts, g_harvests, g_opened, TimeText(g_cycleStart), TimeText(TimeCurrent())));
+   V12Log(StringFormat("CYCLE #%d END - %s: result %s | %s | %d harvests, %d third-trade flips, %d trades opened | %s -> %s",
+                       g_cycleNo, why, Money(result), parts, g_harvests, g_flips, g_opened, TimeText(g_cycleStart), TimeText(TimeCurrent())));
    g_inCycle        = false;
    g_closing        = false;
    g_closeTag       = "";
@@ -606,6 +664,7 @@ void FinishCycle()
    g_P              = 0.0;
    g_cycleFirstDeal = 0;
    g_harvests       = 0;
+   g_flips          = 0;
    g_opened         = 0;
    g_dirty          = true;
   }
@@ -638,6 +697,25 @@ void BeginCloseAll(const string tag, const double R, const double C)
    g_closeNextTry = 0;
    g_dirty        = true;
    ServiceClosing();
+  }
+
+//--- checks 3 and 4: the hard stop (either mode), then the recovery close (Recovery Mode).
+//--- Returns true when one of them is due and the basket is now being closed.
+bool CloseAllDue()
+  {
+   double R = Banked();
+   double C = CloseAllValue();
+   if(R + C <= -InpHardStop + V12_EPS)
+     {
+      BeginCloseAll("HS", R, C);
+      return true;
+     }
+   if(g_mode == V12_MODE_RECOVERY && RecoveryFunded(R, C))
+     {
+      BeginCloseAll("RC", R, C);
+      return true;
+     }
+   return false;
   }
 
 //+------------------------------------------------------------------+
@@ -803,6 +881,7 @@ void ResetState()
    g_cycleStart     = 0;
    g_cycleFirstDeal = 0;
    g_harvests       = 0;
+   g_flips          = 0;
    g_opened         = 0;
    g_trigR          = 0.0;
    g_trigC          = 0.0;
@@ -827,6 +906,8 @@ bool InputsOk()
       err = StringFormat("InpLots %.2f is not a multiple of the volume step %.2f", InpLots, step);
    else if(InpHarvestNet <= 0.0)
       err = "InpHarvestNet must be above 0";
+   else if(InpRecoveryHarvestNet <= 0.0)
+      err = "InpRecoveryHarvestNet must be above 0";
    else if(InpCycleTarget <= 0.0)
       err = "InpCycleTarget must be above 0";
    else if(InpHardStop <= 0.0)
@@ -863,9 +944,9 @@ int OnInit()
      }
    g_filling     = DetectFilling();
    g_needRestore = !g_isTester;
-   V12Log(StringFormat("build %s on %s: lots %.2f | harvest each trade at %s net | Recovery Mode at %s banked | hard stop at %s | third trade: EMA %d/%d on closed M5 bars | magic %I64d%s",
-                       V12_BUILD, _Symbol, InpLots, Amount(InpHarvestNet), Amount(InpCycleTarget), Money(-InpHardStop),
-                       InpEmaFast, InpEmaSlow, InpMagic, (g_isTester ? " | Strategy Tester" : "")));
+   V12Log(StringFormat("build %s on %s: lots %.2f | harvest each trade at %s net (Recovery Mode: %s) | Recovery Mode at %s banked | hard stop at %s | third trade: EMA %d/%d on closed M5 bars, follows it in Recovery Mode | magic %I64d%s",
+                       V12_BUILD, _Symbol, InpLots, Amount(InpHarvestNet), Amount(InpRecoveryHarvestNet), Amount(InpCycleTarget),
+                       Money(-InpHardStop), InpEmaFast, InpEmaSlow, InpMagic, (g_isTester ? " | Strategy Tester" : "")));
    return INIT_SUCCEEDED;
   }
 
@@ -906,31 +987,28 @@ void OnTick()
       SaveIfDirty();
       return;
      }
-   double R = Banked();
-   double C = CloseAllValue();
    //--- 3. hard stop: the whole cycle (banked + open, after costs), in either mode
-   if(R + C <= -InpHardStop + V12_EPS)
-     {
-      BeginCloseAll("HS", R, C);
-      SaveIfDirty();
-      return;
-     }
    //--- 4. recovery close: the fund covers the close-all value
-   if(g_mode == V12_MODE_RECOVERY && RecoveryFunded(R, C))
+   if(CloseAllDue())
      {
-      BeginCloseAll("RC", R, C);
       SaveIfDirty();
       return;
      }
-   //--- 5. harvest
+   //--- 5. harvest (target of the current mode)
    Harvest();
+   //--- 5b. Recovery Mode: the third trade follows the EMA signal; after a flip, checks 3 and 4 go first
+   if(g_mode == V12_MODE_RECOVERY && FollowDirection() && CloseAllDue())
+     {
+      SaveIfDirty();
+      return;
+     }
    //--- 6. Harvest Mode has banked its target: switch, and check 4 again at once
    if(g_mode == V12_MODE_HARVEST)
      {
-      R = Banked();
+      double R = Banked();
       if(R >= InpCycleTarget - V12_EPS)
         {
-         C = CloseAllValue();
+         double C = CloseAllValue();
          SwitchToRecovery(R, C);
          if(RecoveryFunded(R, C))
            {

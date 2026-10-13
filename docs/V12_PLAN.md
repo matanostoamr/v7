@@ -1,7 +1,7 @@
 # v12 Two-Mode Harvester: plan (approved)
 
 **Status:** approved. You said OK, so all the defaults in section 5 are accepted. Build 1.0 is written: `Gold_TwoMode_Harvester_v12.00.mq5`.
-**Build 1.0 tested** (Oct 1–7): −£205.94, with 12 cycles closed at +£5 or more and 9 hard stops. **Build 1.1 proposal: section 9, waiting for your OK. No code has been changed yet.**
+**Build 1.0 tested** (Oct 1–7): −£205.94, with 12 cycles closed at +£5 or more and 9 hard stops. **Build 1.1: section 9, approved (you said OK to all defaults in 9.5) and written.**
 **Fresh bot:** a new file `Gold_TwoMode_Harvester_v12.00.mq5` with magic `120001`, on its own branch. Nothing is taken from v7, v8, v10 or v11.
 
 ## 1. Your design, as I will build it
@@ -25,7 +25,7 @@ There are always three places (slots):
    - start a new cycle.
 6. **Hard stop:** if the whole cycle (banked + open, after costs) reaches **−£30**, close all, in either mode. It is checked before anything else on every tick, and nothing can delay it.
 
-The third trade is never closed or reversed because the direction changed. It keeps its direction until it is harvested, and its refill takes the direction at that moment. *(The build 1.1 proposal changes this for Recovery Mode; see section 9.)*
+The third trade is never closed or reversed because the direction changed. It keeps its direction until it is harvested, and its refill takes the direction at that moment. *(Build 1.1 changes this for Recovery Mode; see section 9.)*
 
 Tell me if any line here is not what you meant.
 
@@ -62,7 +62,8 @@ If nothing is losing when Harvest Mode ends (C ≥ 0), the fund at £0 already c
 2. If the basket is being closed, keep closing. When it is empty, write the cycle result to the journal and start a new cycle. Do nothing else on this tick.
 3. Hard stop: if R + C ≤ −£30, close all.
 4. In Recovery Mode: if F + C ≥ £0, close all.
-5. Harvest every trade whose net is £0.50 or more.
+5. Harvest every trade whose net is £0.50 or more (build 1.1: `InpRecoveryHarvestNet` in Recovery Mode, default £0.50).
+   - 5b (build 1.1, Recovery Mode only): if the EMA signal is against the third trade, close only the third trade, then run checks 3 and 4 again.
 6. In Harvest Mode: if R ≥ £5, switch to Recovery Mode (P = R, F = £0) and run check 4 again at once.
 7. Refill any empty slots.
 
@@ -100,7 +101,7 @@ I'm telling you this so the results don't surprise you. I'll still build your de
 - **Orders:** sent one at a time, and the bot waits for each result. A failed close is retried on the next tick (at most once a second). A failed open is retried after 5 seconds.
 - **Own trades only:** it touches and counts only magic-120001 trades on this symbol. It needs a hedging account (BUY and SELL open together) and will not start on a netting account.
 - **Restart safety (live only):** it saves the cycle start, the mode and P in the terminal. After a restart it carries on with the same cycle instead of opening a second basket. This is not used in the Strategy Tester.
-- **Comments and journal:** each trade carries its slot (`V12 B/S/T`) and its close reason (`V12 HV` harvest, `V12 RC` recovery close, `V12 HS` hard stop). The journal gets one line per mode switch and one per cycle end. This is how I can check your backtest report exactly.
+- **Comments and journal:** each trade carries its slot (`V12 B/S/T`) and its close reason (`V12 HV` harvest, `V12 RC` recovery close, `V12 HS` hard stop, and from build 1.1 `V12 TF` third-trade flip). The journal gets one line per mode switch, one per third-trade flip (build 1.1) and one per cycle end. This is how I can check your backtest report exactly.
 
 ## 7. Not included (only with your OK)
 
@@ -123,7 +124,7 @@ I don't think any of these is needed for the first backtest.
 3. You compile it in MetaEditor and run the same test as before: XAUUSD M5, Oct 1–7, £1,000, real ticks.
 4. I analyse the report cycle by cycle: how many cycles finished at +£5 or more, how many hard stops, and the costs.
 
-## 9. Build 1.1 proposal (waiting for your OK)
+## 9. Build 1.1 (approved)
 
 ### 9.1 What your build 1.0 test showed
 Section 4 predicted this, and your report confirms it:
@@ -156,7 +157,7 @@ I agree with it. The third trade is the only trade that can bring a cycle back, 
    - wait until MT5 confirms it is closed;
    - then open a new third trade, 0.01 lot, in the signal direction (`V12 T`).
 4. If the hard stop or the recovery close is due at that moment, it goes first, and no new third trade is opened.
-5. **Accounting:** the closed trade's result goes into R at once, so the fund (F = R − P) drops by its loss. P does not change and nothing is reset. This is already how build 1.0 counts.
+5. **Accounting:** the closed trade's result goes into R at once, so the fund (F = R − P) drops by its loss. P does not change and nothing is reset. This is already how build 1.0 counts. For live trading, build 1.1 also keeps a trade that has just closed in C, at its last value, until MT5 shows its real result in the history. So a loss is never missing from R + C, not even for one tick. This makes no difference in the tester, where a close shows in the history at once.
 6. The BUY and SELL slots are not touched by this rule.
 7. **Journal:** one line per flip, e.g. `v12 CYCLE #7 T FLIP BUY->SELL net -12.34`, so you can count flips.
 
@@ -175,7 +176,7 @@ Rules 1, 2, 4 and 5 in your message (the £5 protection, BUY/SELL harvesting, th
 - Rule 3 should help most in one-way moves. In all 9 hard stops this week, gold had moved $33–42 against the third trade.
 - Rule 3 can hurt in choppy markets, where EMA 9 and EMA 21 cross back and forth. Each wrong flip books a small loss (a few £) plus about £0.15 cost. The journal's `T FLIP` lines will show how often that happens.
 
-### 9.5 Questions (my default in brackets; say "OK" to accept all of them)
+### 9.5 Questions (all accepted: you said OK)
 1. Does rule 3 apply in Recovery Mode only? [yes; Harvest Mode is unchanged]
 2. Should the third trade flip even when it is in a small profit (below the £0.50 harvest)? [yes; the rule is about direction]
 3. Signal: [existing EMA 9 vs EMA 21 on the last closed M5 bar]
