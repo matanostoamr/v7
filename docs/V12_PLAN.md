@@ -1,6 +1,7 @@
 # v12 Two-Mode Harvester: plan (approved)
 
 **Status:** approved. You said OK, so all the defaults in section 5 are accepted. Build 1.0 is written: `Gold_TwoMode_Harvester_v12.00.mq5`.
+**Build 1.0 tested** (Oct 1–7): −£205.94, with 12 cycles closed at +£5 or more and 9 hard stops. **Build 1.1 proposal: section 9, waiting for your OK. No code has been changed yet.**
 **Fresh bot:** a new file `Gold_TwoMode_Harvester_v12.00.mq5` with magic `120001`, on its own branch. Nothing is taken from v7, v8, v10 or v11.
 
 ## 1. Your design, as I will build it
@@ -24,7 +25,7 @@ There are always three places (slots):
    - start a new cycle.
 6. **Hard stop:** if the whole cycle (banked + open, after costs) reaches **−£30**, close all, in either mode. It is checked before anything else on every tick, and nothing can delay it.
 
-The third trade is never closed or reversed because the direction changed. It keeps its direction until it is harvested, and its refill takes the direction at that moment.
+The third trade is never closed or reversed because the direction changed. It keeps its direction until it is harvested, and its refill takes the direction at that moment. *(The build 1.1 proposal changes this for Recovery Mode; see section 9.)*
 
 Tell me if any line here is not what you meant.
 
@@ -121,3 +122,68 @@ I don't think any of these is needed for the first backtest.
 2. I run a strict compile check (0 errors, 0 warnings) before I push.
 3. You compile it in MetaEditor and run the same test as before: XAUUSD M5, Oct 1–7, £1,000, real ticks.
 4. I analyse the report cycle by cycle: how many cycles finished at +£5 or more, how many hard stops, and the costs.
+
+## 9. Build 1.1 proposal (waiting for your OK)
+
+### 9.1 What your build 1.0 test showed
+Section 4 predicted this, and your report confirms it:
+
+| | Result for the week |
+|---|---|
+| BUY + SELL slots together | **−£96.55** from 678 trades. That is almost exactly their spread + commission (about £0.145 per trade = −£98.42). In every one of the 22 cycles they were negative (−£1.81 to −£9.20). |
+| Third trade, in the 12 winning cycles | **+£7.70 to +£13.28** per cycle |
+| Third trade, in the 9 hard stops | **−£20.92 to −£25.36** per cycle |
+
+So BUY + SELL never pay back a loss; they only pay costs. **Every cycle was won or lost by the third trade.**
+
+Why BUY + SELL can't recover anything. Example: gold goes up $10, then comes back.
+
+| | Fund | BUY open | SELL open | Cycle total |
+|---|---:|---:|---:|---:|
+| Start | £0 | £0 | £0 | £0 |
+| Gold +$10 (BUY harvested about 11 times) | +£5.50 | about £0 | −£7.60 | about −£2 |
+| Gold back to start | +£5.50 | −£7.60 (opened near the top) | about £0 | about −£2 |
+
+The −£2 is just spread and commission. Every harvest + refill moves £0.50 from "open" into the fund, and the refill costs about £0.15. So fund + close value (F + C) goes **down** about £0.15 each time.
+
+### 9.2 Your rule (rule 3): the third trade follows the EMA in Recovery Mode
+I agree with it. The third trade is the only trade that can bring a cycle back, and this rule keeps it on the side gold is moving.
+
+1. **When:** Recovery Mode only, on every tick, after the hard-stop and recovery-close checks.
+2. **Signal:** the existing one: EMA 9 above EMA 21 on the last closed M5 bar means BUY, otherwise SELL. It uses the closed bar, so it changes at most once every 5 minutes. That means at most one flip per bar.
+3. **If the signal is against the open third trade:**
+   - close only the third trade (comment `V12 TF`);
+   - wait until MT5 confirms it is closed;
+   - then open a new third trade, 0.01 lot, in the signal direction (`V12 T`).
+4. If the hard stop or the recovery close is due at that moment, it goes first, and no new third trade is opened.
+5. **Accounting:** the closed trade's result goes into R at once, so the fund (F = R − P) drops by its loss. P does not change and nothing is reset. This is already how build 1.0 counts.
+6. The BUY and SELL slots are not touched by this rule.
+7. **Journal:** one line per flip, e.g. `v12 CYCLE #7 T FLIP BUY->SELL net -12.34`, so you can count flips.
+
+Rules 1, 2, 4 and 5 in your message (the £5 protection, BUY/SELL harvesting, the loss coming out of the fund, the close at F + C ≥ £0, and the −£30 hard stop) are already how build 1.0 works. Only rule 3 is new code.
+
+### 9.3 My proposal: pay less cost while waiting in Recovery Mode
+| | |
+|---|---|
+| **What** | A new input, `InpRecoveryHarvestNet`: the harvest target for all three trades in Recovery Mode. **Default £0.50, the same as now, so your rule 2 is unchanged** unless you set another value in the tester. Harvest Mode stays at `InpHarvestNet` (£0.50). |
+| **Why** | In Recovery Mode, each harvest + refill costs about £0.15 and does not bring the close any nearer (9.1). This week there were 652 harvests in Recovery Mode (501 BUY/SELL, 151 third trade), about **£95** of cost. |
+| **Example** | At £2.00, a trade must move about $2.85 instead of $0.85 before it harvests. That gives roughly 3 times fewer harvests and refills, so roughly 3 times less cost. |
+| **Side effects** | Fewer harvest trades. The fund grows in bigger steps. Each trade swings more before it harvests. The recovery-close rule, the hard stop and the £5 protection do not change. |
+
+### 9.4 Honest limits
+- No rule can promise that every cycle closes without a loss. If gold keeps moving against the basket, the −£30 hard stop is still the last guard.
+- Rule 3 should help most in one-way moves. In all 9 hard stops this week, gold had moved $33–42 against the third trade.
+- Rule 3 can hurt in choppy markets, where EMA 9 and EMA 21 cross back and forth. Each wrong flip books a small loss (a few £) plus about £0.15 cost. The journal's `T FLIP` lines will show how often that happens.
+
+### 9.5 Questions (my default in brackets; say "OK" to accept all of them)
+1. Does rule 3 apply in Recovery Mode only? [yes; Harvest Mode is unchanged]
+2. Should the third trade flip even when it is in a small profit (below the £0.50 harvest)? [yes; the rule is about direction]
+3. Signal: [existing EMA 9 vs EMA 21 on the last closed M5 bar]
+4. Should I add my input `InpRecoveryHarvestNet`? [yes, with default £0.50, so nothing changes unless you set it]
+
+### 9.6 Tests I need after build 1.1
+Use the same settings as before: XAUUSD M5, Oct 1–7, every tick based on real ticks, £1,000, 1:30.
+1. **Test 1:** default inputs. This is your rule exactly, and I'll compare it with build 1.0 (−£205.94, 12 wins, 9 hard stops).
+2. **Test 2** (only if you accept question 4): `InpRecoveryHarvestNet = 2.00`, everything else default.
+
+Send both HTML reports. If you can, also send the Journal lines that start with `v12 CYCLE`.
