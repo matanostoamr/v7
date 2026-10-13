@@ -1,6 +1,6 @@
-# v12 Two-Mode Harvester: plan (no code yet)
+# v12 Two-Mode Harvester: plan (approved)
 
-**Status:** plan only. I will not write any code until you say OK.
+**Status:** approved. You said OK, so all the defaults in section 5 are accepted. Build 1.0 is written: `Gold_TwoMode_Harvester_v12.00.mq5`.
 **Fresh bot:** a new file `Gold_TwoMode_Harvester_v12.00.mq5` with magic `120001`, on its own branch. Nothing is taken from v7, v8, v10 or v11.
 
 ## 1. Your design, as I will build it
