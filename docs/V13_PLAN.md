@@ -1,6 +1,6 @@
-# v13 Market Harvester: plan rev 2 (waiting for your OK)
+# v13 Market Harvester: plan rev 2 (approved)
 
-**Status:** plan only, no code yet. Say **OK** to accept all the defaults in section 6, or tell me what to change.
+**Status:** approved. You said OK to plan B with all the defaults in section 6. Build 1.0 is written: `Gold_Market_Harvester_v13.00.mq5` (notes in section 10).
 **New bot:** `Gold_Market_Harvester_v13.00.mq5`, magic `130001`, on its own branch. v12 stays as it is.
 **Rev 2:** the 3-trades-at-once plan (rev 1) is replaced by your new idea.
 
@@ -79,7 +79,7 @@ Every back-and-forth like this costs about £2.40–£3.90. In my check on your 
 - **The real-tick result will be worse than my check.** Real prices wobble more, which means more turns.
 - **No rule can promise "never a loss".** B makes the losses small and frequent, instead of rare and −£30.
 
-## 6. Questions (my default in brackets; say "OK" to accept all of them)
+## 6. Questions (all accepted: plan B and every default)
 1. **How to add trades:** [B: with the move, pending STOP orders], or A: against the move, LIMIT orders, as you first wrote. If you say A, I'll build A exactly; it lost £156–£703 in my check.
 2. **Market turn:** [$5.00]
 3. **Distance between trades:** [$3.00]
@@ -107,3 +107,27 @@ Every back-and-forth like this costs about £2.40–£3.90. In my check on your 
 Use the same settings as before: XAUUSD M5, Oct 1–7, every tick based on real ticks, £1,000, 1:30.
 1. **Test 1:** default inputs.
 2. **Test 2:** `InpTurn` = 8.00.
+
+## 10. Build 1.0 notes (how the basics are done; no new trading rules)
+- **Order of checks on every tick:**
+  1. Update the trades, the stop order and the market direction.
+  2. If all trades are being closed (turn or hard stop), keep closing. When they are all closed, write the result of the move to the journal.
+  3. Hard stop.
+  4. Turn.
+  5. Harvest.
+  6. If no trade is open, open trade 1 at market.
+  7. Place the stop order for the next trade.
+- **Start:** the bot waits for the first $5 move from where the test (or the EA) starts, up or down.
+- **Hard stop:** the open trades' own results added together (profit + swap − both commissions) at −£30.
+- **Trade numbers in comments:** each open trade (and the waiting stop order) has its own number from 1 to 4. A trade opened when nothing is open is `V13 1`. A number is used again once its trade has been harvested.
+- **If gold is already at or past the next level** when a stop order could be placed, the next trade opens at market. A stop order can't be placed behind the price.
+- **Number of open trades:** with the defaults, **at most 2 trades are open at once** in a steady move. Each trade reaches its £4 harvest about $5.47 after it opens, before the trade $6 further on is added. 3–4 open trades happen only with a smaller `InpStep`, a bigger `InpHarvestNet` or a price jump. `InpMaxTrades` still caps it at 4.
+- **Restart (live only):** the bot carries on with its own open trades.
+  - Their direction becomes the market direction.
+  - The high (or low) starts from the best of their entry prices and the current price.
+  - Its old pending orders are deleted and placed again.
+  - If BUY and SELL trades are both open, it closes them all first.
+- **Journal:**
+  - `v13 FIRST MOVE`;
+  - `v13 TURN #n` once per turn, with the result of the move;
+  - `v13 HARD STOP #n` if the hard stop fires.
