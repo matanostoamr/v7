@@ -240,6 +240,8 @@ Its results:
 
 **2026-10-18, his decision: build 1.2 is the FINAL version.** He wants no more recovery rules or changes for now. He is starting a demo forward test on a VPS with the build 1.2 defaults (mode 2, PullEma 10, ADX 10, MaxTrades 2, news filter on), and he will send **weekly history reports**. For each one: extract it, run `analyse_v14.py`, check the rules, compare with Test C (about +£0.43 per basket, HS about 8% of baskets), post a PR #6 comment, and reply. Don't propose code changes unless he asks. PR #6 stays open until he writes "merge".
 
+**Scalp idea (he asked, 2026-10-18):** harvest £0.50–£1.00 with faster entries, and the same safety inputs. My maths (calibrated on Test C) gives an edge of about £0 per basket at £0.70 and +£0.03 at £1.00, vs +£0.45 at £4. I made 2 untested preset files, `presets/v14_scalp_070.set` and `presets/v14_scalp_100.set` (inputs only, no code change; M5 EMA 9/21, ADX 0, PullEma 5). Build 1.2 defaults are unchanged. Waiting for his backtests. Win rule: more profit than Test C (+£178.15) with an equity drop of no more than about £160.
+
 **Later (not approved):** `InpHedgeDistance` 6 → 14 step 2, on £2,000 (Trade 3 dropped).
 
 **When a report arrives:**

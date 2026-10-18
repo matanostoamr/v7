@@ -1,0 +1,25 @@
+; v14 build 1.2 - SCALP preset (harvest GBP 0.70). Inputs only, no code change. NOT TESTED yet.
+; Same safety: 0.01 lot, MaxTrades 2, hedge $8 x2, basket target GBP 1, hard stop GBP 30.
+InpLots=0.01
+InpMaxTrades=2
+InpHarvestNet=0.70
+InpHedgeDistance=8.0
+InpHedgeMult=2.0
+InpTrade3Mult=3.0
+InpBasketTarget=1.0
+InpHardStop=30.0
+InpEntryMode=2
+InpTrendTF=5
+InpEmaFast=9
+InpEmaSlow=21
+InpAdxPeriod=14
+InpAdxMin=0.0
+InpEntryTF=5
+InpPullEma=5
+InpRsiPeriod=14
+InpRsiMax=70.0
+InpMaxSpread=1.0
+InpNewsFilter=true
+InpNewsStart=15:00
+InpNewsEnd=15:45
+InpMagic=140001
