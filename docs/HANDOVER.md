@@ -1,6 +1,6 @@
 # HANDOVER: read this first (state on 2026-10-18)
 
-This file lets a new chat continue the work exactly where the old one stopped. It covers the user, the rules, the repo, the current bot (v14 build 1.1), all test evidence, the decisions and what happens next.
+This file lets a new chat continue the work exactly where the old one stopped. It covers the user, the rules, the repo, the current bot (v14 build 1.1.1), all test evidence, the decisions and what happens next.
 
 - **Branch:** `feat/v14-hedge-harvester` (PR #6). `main` has only v7.
 - **Detail lives in:** [`docs/V14_PLAN.md`](V14_PLAN.md) rev 3 (the design, maths, inputs and tests) and the PR #6 comments. This file is the summary; when they disagree, the code wins, then the plan.
@@ -197,10 +197,15 @@ Its results:
 - **No entry default was changed in 1.1**, so that Test A measures the news filter alone.
 
 ## 6. Where we are: waiting for the user
-**Test A (news filter):** build 1.1 defaults, 2026.09.01 → 2026.10.15, the same as 1414. Compare with 1414: +£100.37, 279 baskets, 23 hard stops, equity drop £258.37.
+**Build 1.1.1 (optimizer fix, plan section 14):** in optimization MT5 passed `InpNewsStart`/`InpNewsEnd` with quotes (`"15:00"`), so all 30 Test B passes stopped in `OnInit`. The parser now ignores quotes and spaces around the time, and a refused time is logged with its character codes. Trading is unchanged.
+
+**Test A (news filter), done as two runs with build 1.1 (PR #6 comments 6252936431 and 6252965289):**
+- 1414-21, Sep 1–30: +£45.57, equity drop £201.71, 187 baskets, 16 hard stops (build 1.0 September: −£68.11);
+- 1414-2, Oct 1–17: +£212.80, drop £40.61, 99 baskets, 3 hard stops;
+- both months pass the pass rule; 0 rule problems; 0 baskets started 15:00–15:45. The edge is still thin (+£0.24 per basket in September).
 
 **Test B (frequency), optimizer on August:**
-- Period 2026.08.01 → 2026.09.01, build 1.1 defaults, "Slow complete algorithm".
+- Period 2026.08.01 → 2026.09.01, build 1.1.1 defaults, "Slow complete algorithm".
 - `InpEntryMode` 1 → 2, `InpPullEma` 10 → 20 step 5, `InpAdxMin` 0 → 20 step 5. That's 30 passes; he pastes the XML.
 - **The pick:** the setting with the most trades that still makes money, with the biggest drop under £250.
 

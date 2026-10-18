@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Gold_Hedge_Harvester_v14.00.mq5 |
-//|  v14 Hedge Harvester - build 1.1                                 |
+//|  v14 Hedge Harvester - build 1.1.1                               |
 //|  Design: docs/V14_PLAN.md rev 3 (defaults + P1 + P2 + news P3)   |
 //+------------------------------------------------------------------+
 //  Direction, read at each new entry bar (InpEntryTF) from closed bars:
@@ -51,7 +51,7 @@
 #property description "After the hedge all trades close together at the basket target. Hard stop on the whole basket."
 #property description "Margin check for the whole basket (P1), spread limit (P2) and news window (P3) for trade 1. No other features."
 
-#define V14_BUILD          "1.1"
+#define V14_BUILD          "1.1.1"
 #define V14_MAX_POS        8
 #define V14_EPS            0.000000001
 #define V14_DEVIATION      20
@@ -869,12 +869,41 @@ bool SpreadOk()
 //+------------------------------------------------------------------+
 //| P3: news window (no new trade 1; open baskets carry on)          |
 //+------------------------------------------------------------------+
-//--- "HH:MM" -> minutes after midnight (-1 = not a valid time)
+//--- characters the optimizer may wrap a string input in: quotes, spaces, tabs, line ends, no-break space
+bool IsWrapChar(const ushort ch)
+  {
+   return (ch == '"' || ch == '\'' || ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == 0xA0 || ch == 0);
+  }
+
+//--- the input text without wrap characters at either end (build 1.1.1: the optimizer passed "15:00" with quotes)
+string CleanTimeText(const string text)
+  {
+   int n = StringLen(text);
+   int a = 0;
+   int b = n - 1;
+   while(a <= b && IsWrapChar(StringGetCharacter(text, a)))
+      a++;
+   while(b >= a && IsWrapChar(StringGetCharacter(text, b)))
+      b--;
+   if(a > b)
+      return "";
+   return StringSubstr(text, a, b - a + 1);
+  }
+
+//--- the raw input with character codes, for the journal when a time is not valid
+string RawTimeText(const string text)
+  {
+   string codes = "";
+   int n = StringLen(text);
+   for(int c = 0; c < n; c++)
+      codes += (c > 0 ? " " : "") + IntegerToString(StringGetCharacter(text, c));
+   return StringFormat("[%s] (%d chars: %s)", text, n, codes);
+  }
+
+//--- "HH:MM" -> minutes after midnight (-1 = not a valid time). Quotes and spaces around it are ignored.
 int MinutesOf(const string text)
   {
-   string s = text;
-   StringTrimLeft(s);
-   StringTrimRight(s);
+   string s = CleanTimeText(text);
    string parts[];
    if(StringSplit(s, StringGetCharacter(":", 0), parts) != 2)
       return -1;
@@ -1418,7 +1447,8 @@ bool InputsOk()
       g_newsStart = MinutesOf(InpNewsStart);
       g_newsEnd   = MinutesOf(InpNewsEnd);
       if(g_newsStart < 0 || g_newsEnd < 0)
-         err = "InpNewsStart and InpNewsEnd must be server times like 15:00 (HH:MM)";
+         err = "InpNewsStart and InpNewsEnd must be server times like 15:00 (HH:MM); got InpNewsStart " +
+               RawTimeText(InpNewsStart) + ", InpNewsEnd " + RawTimeText(InpNewsEnd);
       else if(g_newsEnd <= g_newsStart)
          err = "InpNewsEnd must be later than InpNewsStart on the same day";
      }

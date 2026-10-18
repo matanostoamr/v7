@@ -57,6 +57,8 @@ long   StringToInteger(const string &s) { return std::atol(s.c_str()); }
 int    StringTrimLeft(string &s) { size_t n = s.find_first_not_of(' '); if(n == string::npos) { int k = (int)s.size(); s.clear(); return k; } s.erase(0, n); return (int)n; }
 int    StringTrimRight(string &s) { size_t n = s.find_last_not_of(' '); if(n == string::npos) { int k = (int)s.size(); s.clear(); return k; } int k = (int)(s.size() - (n + 1)); s.erase(n + 1); return k; }
 int    StringLen(const string &s) { return (int)s.size(); }
+string StringSubstr(const string &s, int start, int len) { return s.substr((size_t)start, (size_t)len); }
+string IntegerToString(long v, int, ushort) { return std::to_string(v); }
 
 static int g_fail = 0, g_pass = 0;
 #define CHECK(cond, what) do { if(cond) g_pass++; else { std::printf("FAIL: %s\n", what); g_fail++; } } while(0)
@@ -74,13 +76,17 @@ int main()
    struct { const char *in; int want; } p[] = {
       {"15:00", 900}, {"15:45", 945}, {" 9:05 ", 545}, {"00:00", 0}, {"23:59", 1439}, {"7:5", 425},
       {"24:00", -1}, {"15:60", -1}, {"1500", -1}, {"15:0a", -1}, {"", -1}, {"   ", -1}, {"15:00:00", -1},
-      {":30", -1}, {"15:", -1}, {"123:00", -1}, {"-1:30", -1}, {"15.30", -1}, {"+1:30", -1} };
+      {":30", -1}, {"15:", -1}, {"123:00", -1}, {"-1:30", -1}, {"15.30", -1}, {"+1:30", -1},
+      //--- build 1.1.1: the optimizer passes string inputs with quotes
+      {"\"15:00\"", 900}, {"\"15:45\"", 945}, {"'15:00'", 900}, {" \"15:00\" ", 900}, {"\t15:00\r\n", 900},
+      {"\"\"15:00\"\"", 900}, {"\xA0" "15:00", 900}, {"\"\"", -1}, {"\"15:60\"", -1}, {"\"15\":00", -1}, {"\"1500\"", -1} };
    for(auto &c : p)
      {
       int got = MinutesOf(c.in);
       char w[96]; std::snprintf(w, sizeof(w), "MinutesOf(\"%s\") = %d, want %d", c.in, got, c.want);
       CHECK(got == c.want, w);
      }
+   CHECK(RawTimeText("\"15:00\"") == "[\"15:00\"] (7 chars: 34 49 53 58 48 48 34)", "RawTimeText");
    CHECK(ClockText(900) == "15:00" && ClockText(945) == "15:45" && ClockText(545) == "09:05" && ClockText(0) == "00:00", "ClockText");
 
    //--- the window: 15:00 to 15:45, Monday to Friday (2026-09-07 is a Monday)

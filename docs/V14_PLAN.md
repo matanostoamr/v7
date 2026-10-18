@@ -1,4 +1,4 @@
-# v14 Hedge Harvester: plan rev 3 (build 1.1 written: + P3 news filter)
+# v14 Hedge Harvester: plan rev 4 (build 1.1.1: + P3 news filter, optimizer time fix)
 
 **Status:** you tested build 1.0 (report 1414, Sep 1 – Oct 15: +£100.37, every rule followed). Build 1.1 adds P3 as a news filter only, as you asked (section 13). Nothing else changed. v13 stays as it is (PR #5, stopped).
 **New bot:** `Gold_Hedge_Harvester_v14.00.mq5`, magic `140001`, on its own branch `feat/v14-hedge-harvester`.
@@ -220,3 +220,10 @@ Choosing on one month and checking on others avoids the luck problem we saw in v
 - **Wait for the next limit:**
   - after a harvest: a median of 3 minutes;
   - after a basket target: a median of 43 minutes. Gold is then on the other side of the EMA, so mode 1 has no signal.
+
+## 14. Build 1.1.1 notes (optimizer fix)
+- **Problem:** the August optimizer (Test B) stopped all 30 passes in `OnInit`: "InpNewsStart and InpNewsEnd must be server times like 15:00". In optimization MT5 passed the string inputs wrapped in quotes (`"15:00"`), and the HH:MM check refused them.
+- **Fix:** the time parser now ignores quotes (`"` and `'`), spaces, tabs, line ends and no-break spaces around the time. The time itself is checked as before: HH:MM, 00:00–23:59, end later than start.
+- **If a time is still refused,** the journal line now also shows the raw text and its character codes, for example `got InpNewsStart ["15:00"] (7 chars: 34 49 53 58 48 48 34)`.
+- **Not changed:** no trading rule and no default changed. Build 1.1.1 trades exactly like build 1.1. Reports 1414-2 and 1414-21 stay valid.
+- **Checked here:** offline syntax and type check, 0 errors and 0 warnings. The local time-code check now has 53 cases (+11 quoted inputs, +1 raw-text line). This is not MetaEditor, so please compile it. No backtest was run.

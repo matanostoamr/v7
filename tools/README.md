@@ -11,7 +11,7 @@ g++ -std=c++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter v14_check.cpp
 - **Passing:** no output from g++ means 0 errors and 0 warnings. This is **not** MetaEditor: the user still compiles in MT5.
 - **ASCII only:** `mql2cpp.py` stops on any non-ASCII byte, so keep `.mq5` files ASCII (no `£` in code or comments).
 - **Shim:** `mql5_shim.h` declares the MQL5 functions and types the bots use. If a new MQL5 function is used, add its declaration there.
-- **News test:** `news_window_test.cpp` checks the v14 news window code (41 cases). Build it after `mql2cpp.py`:
+- **News test:** `news_window_test.cpp` checks the v14 news window code (53 cases, incl. quoted optimizer inputs since build 1.1.1). Build it after `mql2cpp.py`:
   ```
   g++ -std=c++17 -O0 -w -o news_window_test news_window_test.cpp -Wl,--unresolved-symbols=ignore-all && ./news_window_test
   ```
