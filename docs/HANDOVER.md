@@ -238,7 +238,9 @@ Its results:
 - The earlier "saves ≈ £1,065" was a best case and wrong: it ignored the stop moving closer. `InpMaxTrades` stays 2.
 - The cut-hedge idea has the same problem: about half the baskets that come back to trade 1's price still end BT. A rough estimate is about break-even, not +£751. Don't build it without his OK.
 
-**Later:** `InpHedgeDistance` 6 → 14 step 2, on £2,000 (Trade 3 dropped).
+**2026-10-18, his decision: build 1.2 is the FINAL version.** He wants no more recovery rules or changes for now. He is starting a demo forward test on a VPS with the build 1.2 defaults (mode 2, PullEma 10, ADX 10, MaxTrades 2, news filter on), and he will send **weekly history reports**. For each one: extract it, run `analyse_v14.py`, check the rules, compare with Test C (about +£0.43 per basket, HS about 8% of baskets), post a PR #6 comment, and reply. Don't propose code changes unless he asks. PR #6 stays open until he writes "merge".
+
+**Later (not approved):** `InpHedgeDistance` 6 → 14 step 2, on £2,000 (Trade 3 dropped).
 
 **When a report arrives:**
 1. Extract it.
