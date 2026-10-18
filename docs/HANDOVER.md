@@ -225,7 +225,20 @@ Its results:
 
 **Build 1.2:** the new defaults from B and C, **only after his OK.** He said "let's enable that" if more trades come without excessive risk, but he was told "With your OK it becomes the new default in build 1.2". So show the pick and ask for OK.
 
-**Later:** `InpMaxTrades` 1 → 3 with `InpHedgeDistance` 6 → 14 step 2, on £2,000.
+**Trade 3 test, 1414-5 (build 1.2, `InpMaxTrades` 3, £1,300, Aug 1 → Oct 17): FAILED.**
+
+| | Test C (MaxTrades 2) | 1414-5 (MaxTrades 3) |
+|---|---|---|
+| Net | +£178.15 | −£205.95 |
+| Equity drop | £157.69 (max month) | £432.33 (31.3%) |
+| Baskets / HS | 412 / 34 | 509 / 56 |
+
+- Trade 3 opened in 109 baskets: 53 BT (+£85.29), 56 HS (−£1,703.19). That's a 49% win rate, but it needs about 95%.
+- Why: Trade 3 moves the hard stop to about $12 past trade 1's price (it was about $24). The target is about $9 away. So it's a coin flip that risks £30 to win £1.6.
+- The earlier "saves ≈ £1,065" was a best case and wrong: it ignored the stop moving closer. `InpMaxTrades` stays 2.
+- The cut-hedge idea has the same problem: about half the baskets that come back to trade 1's price still end BT. A rough estimate is about break-even, not +£751. Don't build it without his OK.
+
+**Later:** `InpHedgeDistance` 6 → 14 step 2, on £2,000 (Trade 3 dropped).
 
 **When a report arrives:**
 1. Extract it.
