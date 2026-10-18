@@ -1,4 +1,4 @@
-# v14 Hedge Harvester: plan rev 4 (build 1.1.1: + P3 news filter, optimizer time fix)
+# v14 Hedge Harvester: plan rev 5 (build 1.2: new entry defaults after Tests B and C)
 
 **Status:** you tested build 1.0 (report 1414, Sep 1 – Oct 15: +£100.37, every rule followed). Build 1.1 adds P3 as a news filter only, as you asked (section 13). Nothing else changed. v13 stays as it is (PR #5, stopped).
 **New bot:** `Gold_Hedge_Harvester_v14.00.mq5`, magic `140001`, on its own branch `feat/v14-hedge-harvester`.
@@ -132,9 +132,9 @@ MT5 charges the uncovered volume at the normal rate, and the covered (hedged) vo
 - `InpTrade3Mult` 3.0: trade 3 lot = InpLots × 3.0 = 0.03
 - `InpBasketTarget` 1.00 (£): after the hedge, all trades close together at this net
 - `InpHardStop` 30.00 (£)
-- `InpEntryMode` 1 (1 = limit, 2 = market)
-- `InpTrendTF` M15, `InpEmaFast` 20, `InpEmaSlow` 50, `InpAdxPeriod` 14, `InpAdxMin` **15** (0 = off)
-- `InpEntryTF` M5, `InpPullEma` 20, `InpRsiPeriod` 14, `InpRsiMax` 70 (sells use 100 − 70 = 30; 100 = off)
+- `InpEntryMode` **2** (1 = limit, 2 = market; build 1.2, was 1)
+- `InpTrendTF` M15, `InpEmaFast` 20, `InpEmaSlow` 50, `InpAdxPeriod` 14, `InpAdxMin` **10** (0 = off; build 1.2, was 15)
+- `InpEntryTF` M5, `InpPullEma` **10** (build 1.2, was 20), `InpRsiPeriod` 14, `InpRsiMax` 70 (sells use 100 − 70 = 30; 100 = off)
 - `InpMaxSpread` 1.00 $ (P2; 0 = off)
 - `InpNewsFilter` true, `InpNewsStart` "15:00", `InpNewsEnd` "15:45" (P3; server time HH:MM, Monday to Friday; false = no news filter, as in build 1.0)
 - `InpMagic` 140001
@@ -227,3 +227,16 @@ Choosing on one month and checking on others avoids the luck problem we saw in v
 - **If a time is still refused,** the journal line now also shows the raw text and its character codes, for example `got InpNewsStart ["15:00"] (7 chars: 34 49 53 58 48 48 34)`.
 - **Not changed:** no trading rule and no default changed. Build 1.1.1 trades exactly like build 1.1. Reports 1414-2 and 1414-21 stay valid.
 - **Checked here:** offline syntax and type check, 0 errors and 0 warnings. The local time-code check now has 53 cases (+11 quoted inputs, +1 raw-text line). This is not MetaEditor, so please compile it. No backtest was run.
+
+## 15. Build 1.2 notes (new entry defaults, user OK on 2026-10-18)
+- **Changed:** 3 defaults only: `InpEntryMode` 1 → 2 (market), `InpPullEma` 20 → 10, `InpAdxMin` 15 → 10. `InpNewsFilter` stays true. No trading rule changed; build 1.2 with the old 3 values trades exactly like build 1.1.1.
+- **Why:** Test B (August optimizer, 30 passes) picked it; Test C with build 1.1.1 confirmed it:
+
+| Run | Period | Net | Equity drop | Baskets | Hard stops |
+|---|---|---|---|---|---|
+| 1414-41 | Aug 1–31 (the month it was picked on) | +£8.17 | £101.67 | 160 | 15 |
+| 1414-42 | Sep 1–30 | +£24.26 | £157.69 | 167 | 15 |
+| 1414-43 | Oct 1–18 | +£145.72 | £55.99 | 86 | 4 |
+
+- **Known weak spot:** 34 hard stops cost −£1,030.68; 247 harvests + 131 basket targets made +£1,217.85. PF 1.01–1.02 in Aug/Sep. July was not run (the user chose demo forward-testing instead).
+- **Checked here:** offline syntax and type check, 0 errors and 0 warnings; time-code check 53/53. Not a MetaEditor compile. No backtest was run.

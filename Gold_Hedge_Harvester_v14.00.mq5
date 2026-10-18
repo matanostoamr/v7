@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                  Gold_Hedge_Harvester_v14.00.mq5 |
-//|  v14 Hedge Harvester - build 1.1.1                               |
-//|  Design: docs/V14_PLAN.md rev 3 (defaults + P1 + P2 + news P3)   |
+//|  v14 Hedge Harvester - build 1.2                                 |
+//|  Design: docs/V14_PLAN.md rev 5 (defaults + P1 + P2 + news P3)   |
 //+------------------------------------------------------------------+
 //  Direction, read at each new entry bar (InpEntryTF) from closed bars:
 //    trend   : EMA InpEmaFast above EMA InpEmaSlow on InpTrendTF -> buys
@@ -51,7 +51,7 @@
 #property description "After the hedge all trades close together at the basket target. Hard stop on the whole basket."
 #property description "Margin check for the whole basket (P1), spread limit (P2) and news window (P3) for trade 1. No other features."
 
-#define V14_BUILD          "1.1.1"
+#define V14_BUILD          "1.2"
 #define V14_MAX_POS        8
 #define V14_EPS            0.000000001
 #define V14_DEVIATION      20
@@ -81,14 +81,14 @@ input double          InpHedgeMult     = 2.0;             // Hedge lot = InpLots
 input double          InpTrade3Mult    = 3.0;             // Trade 3 lot = InpLots x this (InpMaxTrades 3 only)
 input double          InpBasketTarget  = 1.00;            // After the hedge: all trades close together at this net
 input double          InpHardStop      = 30.00;           // Hard stop: loss of the open trades together
-input V14_ENTRY       InpEntryMode     = V14_ENTRY_LIMIT; // Trade 1 entry
+input V14_ENTRY       InpEntryMode     = V14_ENTRY_MARKET; // Trade 1 entry (build 1.2 default: 2, market)
 input ENUM_TIMEFRAMES InpTrendTF       = PERIOD_M15;      // Trend timeframe (EMAs and ADX)
 input int             InpEmaFast       = 20;              // Trend: fast EMA
 input int             InpEmaSlow       = 50;              // Trend: slow EMA
 input int             InpAdxPeriod     = 14;              // Movement: ADX period
-input double          InpAdxMin        = 15.0;            // Movement: no new basket while ADX is below this (0 = off)
+input double          InpAdxMin        = 10.0;            // Movement: no new basket while ADX is below this (0 = off)
 input ENUM_TIMEFRAMES InpEntryTF       = PERIOD_M5;       // Entry timeframe (entry EMA and RSI)
-input int             InpPullEma       = 20;              // Entry: pullback EMA
+input int             InpPullEma       = 10;              // Entry: pullback EMA
 input int             InpRsiPeriod     = 14;              // Entry: RSI period
 input double          InpRsiMax        = 70.0;            // Entry: no buy at RSI >= this, no sell at RSI <= 100 - this (100 = off)
 input double          InpMaxSpread     = 1.00;            // No new trade 1 while the spread is above this many $ (0 = off)

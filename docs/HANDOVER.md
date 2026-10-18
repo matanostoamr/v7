@@ -66,12 +66,12 @@ Its results:
   - "News Filter ONLY (No Friday / General Quiet Time): I want the bot to trade maximum hours. Please do NOT add general quiet times or disable Friday nights. Only add a dedicated US News Window Filter (… 15:00 and 15:45 on weekdays …). Make this a toggle input (InpNewsFilter = true/false, with start/end time inputs)."
   - "Increase Trade Frequency … If switching to Market Entry (InpEntryMode=2) or adjusting the entry EMA/ADX gives more active intraday trades without adding excessive risk, let's enable that."
 
-## 4. v14 build 1.1: what the bot does now (commit `0f9f0db`)
+## 4. v14 build 1.2: what the bot does now (1.1 rules, new entry defaults since 1.2)
 **File:** `Gold_Hedge_Harvester_v14.00.mq5`, magic 140001. It needs a hedging account. The code is ASCII-only.
 
 **Direction** is read on each new M5 bar, from closed bars:
 - **Trend:** M15 EMA 20 above EMA 50 → buys only; below → sells only.
-- **Movement:** M15 ADX(14) must be at least `InpAdxMin` 15 (0 = off).
+- **Movement:** M15 ADX(14) must be at least `InpAdxMin` 10 (0 = off; was 15 before build 1.2).
 - **RSI:** no buy while M5 RSI(14) ≥ 70, no sell while it is ≤ 30.
 
 **Trade 1** (0.01). **One basket at a time.**
@@ -101,13 +101,13 @@ Its results:
 | Input | Default | | Input | Default |
 |---|---|---|---|---|
 | InpLots | 0.01 | | InpEmaFast / InpEmaSlow | 20 / 50 |
-| InpMaxTrades | 2 | | InpAdxPeriod / InpAdxMin | 14 / 15.0 |
+| InpMaxTrades | 2 | | InpAdxPeriod / InpAdxMin | 14 / 10.0 (1.2) |
 | InpHarvestNet | 4.00 | | InpEntryTF | M5 |
-| InpHedgeDistance | 8.00 | | InpPullEma | 20 |
+| InpHedgeDistance | 8.00 | | InpPullEma | 10 (1.2) |
 | InpHedgeMult / InpTrade3Mult | 2.0 / 3.0 | | InpRsiPeriod / InpRsiMax | 14 / 70 (100 = off) |
 | InpBasketTarget | 1.00 | | InpMaxSpread | 1.00 (0 = off) |
 | InpHardStop | 30.00 | | InpNewsFilter | true |
-| InpEntryMode | 1 (limit; 2 = market) | | InpNewsStart / InpNewsEnd | "15:00" / "15:45" |
+| InpEntryMode | 2 (market; 1 = limit) (1.2) | | InpNewsStart / InpNewsEnd | "15:00" / "15:45" |
 | InpTrendTF | M15 | | InpMagic | 140001 |
 
 **Code map:**
@@ -219,7 +219,9 @@ Its results:
 
 - 0 rule problems in all three; every trade 1 at market; 0 starts in 15:00–15:45.
 - Passes the pass rule in Aug, Sep, Oct. Sum +£178.15 vs defaults +£106.00. Edge is thin in Aug/Sep (PF 1.01 / 1.02).
-- **July (C2, 07.01 → 08.01) is still not run.** Build 1.2 defaults only after July passes and he says OK.
+- July was not run: on 2026-10-18 he decided 3 months is enough and gave the OK.
+
+**Build 1.2 (done, his OK):** defaults now `InpEntryMode` 2, `InpPullEma` 10, `InpAdxMin` 10, news filter on (plan section 15). Next: demo forward test, and talk about edge ideas (none approved yet).
 
 **Build 1.2:** the new defaults from B and C, **only after his OK.** He said "let's enable that" if more trades come without excessive risk, but he was told "With your OK it becomes the new default in build 1.2". So show the pick and ask for OK.
 
