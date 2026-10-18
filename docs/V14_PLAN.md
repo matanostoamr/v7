@@ -1,6 +1,6 @@
-# v14 Hedge Harvester: plan rev 2 (approved, build 1.0 written)
+# v14 Hedge Harvester: plan rev 3 (build 1.1 written: + P3 news filter)
 
-**Status:** you said OK to the defaults + P1 + P2. Build 1.0 is written: `Gold_Hedge_Harvester_v14.00.mq5` (notes in section 12). v13 stays as it is (PR #5, stopped).
+**Status:** you tested build 1.0 (report 1414, Sep 1 – Oct 15: +£100.37, every rule followed). Build 1.1 adds P3 as a news filter only, as you asked (section 13). Nothing else changed. v13 stays as it is (PR #5, stopped).
 **New bot:** `Gold_Hedge_Harvester_v14.00.mq5`, magic `140001`, on its own branch `feat/v14-hedge-harvester`.
 **Numbers in this plan:**
 - gold at $4,000; 0.01 lot = $1 per $1 move ≈ £0.75 (GBP/USD 1.33);
@@ -104,10 +104,10 @@ MT5 charges the uncovered volume at the normal rate, and the covered (hedged) vo
 - **Why:** v13 spreads were $0.08–$1.50 (middle $0.36). In all three v13 tests (Sep 1–10, Oct week ×2), trades opened from 23:00 to 02:59 server time lost money: −£88, −£38, −£30. These are the daily close and open hours, when spreads are usually widest.
 - **Side effect:** fewer baskets around the daily open and in news spikes.
 
-**P3. Quiet times (optional)**
-- **What:** no new basket from 15:00 to 15:45 server time (US news is at 15:30), and none on Friday after 21:00.
-- **Why:** both v13 hard stops came at 15:30 news: Sep 4 −£51.62 and Sep 11 about −£45. A v13 move lasted 14 minutes in the middle case, so most baskets started before 15:00 are closed by 15:30.
-- **Side effect:** misses the big news moves, which can also be profits. Baskets already open keep running.
+**P3. News filter (built in 1.1, your version: news window only)**
+- **What:** with `InpNewsFilter` true, no new basket from `InpNewsStart` 15:00 to `InpNewsEnd` 15:45 server time, Monday to Friday. A waiting limit order is deleted when the window starts. Open baskets carry on as normal (hedge, basket target, hard stop). There is no Friday-night rule and no other quiet time.
+- **Why:** in report 1414, 11 baskets started 15:00–15:45. Together they made −£97.13, and 4 of them were hard stops. US news comes at 15:30 server time (8:30 New York).
+- **Side effect:** 45 minutes a day (3.3% of market time) without a new basket. Baskets opened before 15:00 still meet the news: in report 1414, 3 of the 4 hard stops right at 15:30 came from baskets opened hours earlier.
 
 **P4. Daily loss limit (optional)**
 - **What:** after the day's closed trades reach −£60 (two hard stops), no new basket until the next day.
@@ -123,7 +123,7 @@ MT5 charges the uncovered volume at the normal rate, and the covered (hedged) vo
 6. **Lots:** [0.01 / 0.02 / 0.03].
 7. **Improvements:** [P1 + P2], plus P3 and/or P4 if you want them.
 
-## 8. The complete list of inputs (build 1.0)
+## 8. The complete list of inputs (build 1.1)
 - `InpLots` 0.01: trade 1
 - `InpMaxTrades` 2 (1 = no hedge, 2 = + hedge, 3 = + trade 3)
 - `InpHarvestNet` 4.00 (£): trade 1 alone closes at this net
@@ -136,6 +136,7 @@ MT5 charges the uncovered volume at the normal rate, and the covered (hedged) vo
 - `InpTrendTF` M15, `InpEmaFast` 20, `InpEmaSlow` 50, `InpAdxPeriod` 14, `InpAdxMin` **15** (0 = off)
 - `InpEntryTF` M5, `InpPullEma` 20, `InpRsiPeriod` 14, `InpRsiMax` 70 (sells use 100 − 70 = 30; 100 = off)
 - `InpMaxSpread` 1.00 $ (P2; 0 = off)
+- `InpNewsFilter` true, `InpNewsStart` "15:00", `InpNewsEnd` "15:45" (P3; server time HH:MM, Monday to Friday; false = no news filter, as in build 1.0)
 - `InpMagic` 140001
 
 ## 9. Necessary basics (no effect on trading decisions)
@@ -162,14 +163,16 @@ MT5 charges the uncovered volume at the normal rate, and the covered (hedged) vo
   - a summary at the end of a test: baskets, % harvested by trade 1 alone (the key number from section 2), hedge recoveries, trade 3 recoveries, hard stops, average per basket.
 - **Restart (live only):** the bot carries on with its own open trades if they form a basket. If they don't, it closes them.
 
-## 10. Tests after the build
-1. **Step 1, one test:** August, 2026.08.01 → 2026.09.01 (the tester stops at the start of the end date). Use XAUUSD M5, every tick based on real ticks, £1,000, 1:30 and the default inputs. Attach the HTML report, or paste it. I'll check the rules trade by trade, the margin numbers and the trade 1 harvest rate.
-2. **Step 2, optimizer on August only:** `InpMaxTrades` 1 → 3, `InpHedgeDistance` 6 → 14 step 2, `InpEntryMode` 1 → 2. That's 30 passes with "Slow complete algorithm". Paste the XML. Use £2,000 if step 1 shows that 3 trades need more than about £650 margin.
-3. **Step 3, check on new months:** take the best August setting, unchanged, and run it on July (07.01 → 08.01), September (09.01 → 10.01) and October (10.01 → 10.15). v14 passes only if it makes money in all three and the biggest drop stays below £250.
+## 10. Tests after build 1.1
+Use XAUUSD M5, every tick based on real ticks, £1,000 and 1:30 (the tester stops at the start of the end date).
+1. **Test A, the news filter:** build 1.1 with the defaults, 2026.09.01 → 2026.10.15, so the same test as report 1414. Compare with 1414: +£100.37, 279 baskets, 23 hard stops.
+2. **Test B, frequency optimizer on August:** 2026.08.01 → 2026.09.01, build 1.1 defaults, with `InpEntryMode` 1 → 2, `InpPullEma` 10 → 20 step 5 and `InpAdxMin` 0 → 20 step 5. That's 30 passes with "Slow complete algorithm", and the defaults are one of them. Paste the XML. The pick: the setting with the most trades that still makes money, with the biggest drop below £250.
+3. **Test C, check on other months:** the Test B pick, unchanged, on July (07.01 → 08.01) and on Sep 1 → Oct 15. It becomes the new default only if it makes money in both and the biggest drop stays below £250.
+4. **Later:** the old step 2 (`InpMaxTrades` 1 → 3, `InpHedgeDistance` 6 → 14 step 2) with £2,000. In report 1414, 2 trades used about £328 margin, so 3 trades need about £656.
 
 Choosing on one month and checking on others avoids the luck problem we saw in v13, where the best InpTurn was different in every month.
 
-## 11. Later (not in build 1.0)
+## 11. Later (not built)
 - Distances that follow the market's speed (ATR) instead of fixed $. v13's best InpTurn was different in every month.
 - Broker-side safety stops, so the hard stop also works when MT5 is off. This is needed before a live account.
 - More news times, for example 21:00 for US rate decisions.
@@ -190,3 +193,30 @@ Choosing on one month and checking on others avoids the luck problem we saw in v
   - one `BASKET #n` line per basket: how it ended, the result, trades used, start and end time;
   - a `SUMMARY` line at the end: baskets, % harvested by trade 1 alone, recoveries with the hedge and with trade 3, hard stops, total, average.
 - **Checked here:** a syntax and type check with my offline checker (0 errors, 0 warnings). That is not MetaEditor, so please compile it. No backtest was run, as you asked.
+
+## 13. Build 1.1 notes (after report 1414)
+- **Built:** only the P3 news filter, as you asked: `InpNewsFilter` (true/false), `InpNewsStart`, `InpNewsEnd`. With `InpNewsFilter` false, build 1.1 trades exactly like build 1.0.
+- **Not changed:** the entry defaults (mode 1, `InpPullEma` 20, `InpAdxMin` 15). Test A then shows the news filter's effect on its own, and Test B measures the frequency settings.
+- **Journal:** the settings line shows the news window, and there is one line when each window starts.
+- **One limit:** the tester fills pending orders before the bot sees a tick. If the very first tick of the window fills a waiting limit, that basket is a normal trade 1 and carries on. This can happen at most once per window, and rarely.
+- **Checked here:**
+  - offline syntax and type check: 0 errors, 0 warnings;
+  - a local check of the new time code, 41 cases: HH:MM parsing, 15:00:00 blocked, 15:45:00 allowed, weekends, no Friday rule.
+  - This is not MetaEditor, so please compile it. No backtest was run.
+
+**What limited the number of baskets in report 1414.** Market time was 736 hours (weekdays 01:00–24:00 server time):
+
+| Where the time went | Share |
+|---|---:|
+| Inside a basket (one at a time) | 62.8% |
+| … of which hedged baskets, waiting for +£1 or the hard stop | 52.4% |
+| A limit order waiting at the M5 EMA 20 | 19.4% |
+| No signal: ADX below 15, M5 close on the wrong side of the EMA, or RSI 70/30 | 17.7% |
+
+- **Upper limits with one basket at a time:**
+  - even if every free minute were used, the most possible was about 444 baskets (+59%);
+  - removing all the limit waiting would add at most 24%;
+  - removing all the no-signal time would add at most 22%. The ADX filter is only part of that 22%.
+- **Wait for the next limit:**
+  - after a harvest: a median of 3 minutes;
+  - after a basket target: a median of 43 minutes. Gold is then on the other side of the EMA, so mode 1 has no signal.

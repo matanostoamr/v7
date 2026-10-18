@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                  Gold_Hedge_Harvester_v14.00.mq5 |
-//|  v14 Hedge Harvester - build 1.0                                 |
-//|  Design: docs/V14_PLAN.md rev 2 (approved: defaults + P1 + P2)   |
+//|  v14 Hedge Harvester - build 1.1                                 |
+//|  Design: docs/V14_PLAN.md rev 3 (defaults + P1 + P2 + news P3)   |
 //+------------------------------------------------------------------+
 //  Direction, read at each new entry bar (InpEntryTF) from closed bars:
 //    trend   : EMA InpEmaFast above EMA InpEmaSlow on InpTrendTF -> buys
@@ -29,6 +29,9 @@
 //                (broker's hedge rule). A hedge or trade 3 that fails 3 times
 //                closes the basket.
 //  P2 spread   : no new trade 1 while the spread is above InpMaxSpread.
+//  P3 news     : InpNewsFilter on -> no new trade 1 from InpNewsStart to
+//                InpNewsEnd (server time), Monday to Friday. A waiting limit
+//                order is deleted. Open baskets carry on as normal.
 //
 //  Order of checks on every tick:
 //    1. update the trades and the limit order
@@ -38,16 +41,17 @@
 //    5. hedge   6. trade 3
 //    7. new entry bar: read the signal
 //    8. no basket: place, move or delete the limit (mode 1), or open trade 1
-//       at market (mode 2)
+//       at market (mode 2). In the news window (P3): no trade 1, and a
+//       waiting limit is deleted.
 //+------------------------------------------------------------------+
 #property copyright   "matanostoamr"
 #property link        "https://github.com/matanostoamr/v7"
 #property version     "14.00"
 #property description "v14 Hedge Harvester: trade 1 on a pullback in the trend. It harvests, or a 2x hedge opens the other way."
 #property description "After the hedge all trades close together at the basket target. Hard stop on the whole basket."
-#property description "Margin check for the whole basket (P1) and a spread limit for trade 1 (P2). No other features."
+#property description "Margin check for the whole basket (P1), spread limit (P2) and news window (P3) for trade 1. No other features."
 
-#define V14_BUILD          "1.0"
+#define V14_BUILD          "1.1"
 #define V14_MAX_POS        8
 #define V14_EPS            0.000000001
 #define V14_DEVIATION      20
@@ -88,6 +92,9 @@ input int             InpPullEma       = 20;              // Entry: pullback EMA
 input int             InpRsiPeriod     = 14;              // Entry: RSI period
 input double          InpRsiMax        = 70.0;            // Entry: no buy at RSI >= this, no sell at RSI <= 100 - this (100 = off)
 input double          InpMaxSpread     = 1.00;            // No new trade 1 while the spread is above this many $ (0 = off)
+input bool            InpNewsFilter    = true;            // News filter: no new trade 1 from start to end, Mon-Fri (open trades carry on)
+input string          InpNewsStart     = "15:00";         // News filter start, server time HH:MM (Pepperstone 15:30 = 8:30 New York)
+input string          InpNewsEnd       = "15:45";         // News filter end, server time HH:MM (trade 1 allowed again from this minute)
 input long            InpMagic         = 140001;          // Magic number
 
 //+------------------------------------------------------------------+
@@ -151,6 +158,9 @@ bool     g_pullBuy      = false;   // mode 2: a bar closed below the entry EMA s
 bool     g_pullSell     = false;   // mode 2: a bar closed above the entry EMA since the last reclaim
 int      g_marginState  = 0;       // P1 for the next trade 1: 0 not checked yet, 1 enough, -1 not enough
 bool     g_marginLow    = false;   // the last check found too little margin (journal once)
+bool     g_inNews       = false;   // P3: the news window is on now (no new trade 1)
+int      g_newsStart    = 0;       // P3: window start, minutes after midnight (server time)
+int      g_newsEnd      = 0;       // P3: window end (this minute is outside the window)
 
 //--- summary (journal at the end)
 int      g_sumBaskets   = 0;
@@ -857,6 +867,66 @@ bool SpreadOk()
   }
 
 //+------------------------------------------------------------------+
+//| P3: news window (no new trade 1; open baskets carry on)          |
+//+------------------------------------------------------------------+
+//--- "HH:MM" -> minutes after midnight (-1 = not a valid time)
+int MinutesOf(const string text)
+  {
+   string s = text;
+   StringTrimLeft(s);
+   StringTrimRight(s);
+   string parts[];
+   if(StringSplit(s, StringGetCharacter(":", 0), parts) != 2)
+      return -1;
+   int v[2] = {0, 0};
+   for(int k = 0; k < 2; k++)
+     {
+      int n = StringLen(parts[k]);
+      if(n < 1 || n > 2)
+         return -1;
+      for(int c = 0; c < n; c++)
+        {
+         ushort ch = StringGetCharacter(parts[k], c);
+         if(ch < '0' || ch > '9')
+            return -1;
+        }
+      v[k] = (int)StringToInteger(parts[k]);
+     }
+   if(v[0] > 23 || v[1] > 59)
+      return -1;
+   return v[0] * 60 + v[1];
+  }
+
+string ClockText(const int minutes)
+  {
+   return StringFormat("%02d:%02d", minutes / 60, minutes % 60);
+  }
+
+//--- is this tick inside the window? (server time of the tick, Monday to Friday)
+bool NewsWindowNow()
+  {
+   if(!InpNewsFilter)
+      return false;
+   MqlDateTime dt;
+   TimeToStruct((datetime)(g_nowMsc / 1000), dt);
+   if(dt.day_of_week < 1 || dt.day_of_week > 5)
+      return false;
+   int m = dt.hour * 60 + dt.min;
+   return (m >= g_newsStart && m < g_newsEnd);
+  }
+
+//--- every tick; one journal line when a window starts. A limit order that the very first tick of the
+//--- window fills, before the bot sees that tick, is a normal trade 1 (the tester fills orders first).
+void UpdateNewsWindow()
+  {
+   bool now = NewsWindowNow();
+   if(now && !g_inNews)
+      V14Log(StringFormat("news window %s-%s: no new trade 1 until %s%s", ClockText(g_newsStart), ClockText(g_newsEnd), ClockText(g_newsEnd),
+                          (g_basket ? " (the open basket carries on)" : (g_limitTicket != 0 ? " (the waiting limit order is deleted)" : ""))));
+   g_inNews = now;
+  }
+
+//+------------------------------------------------------------------+
 //| Signal (closed bars only)                                        |
 //+------------------------------------------------------------------+
 double Buf(const int handle, const int buffer, const int shift)
@@ -1149,6 +1219,8 @@ void ManageEntry()
      }
    int  dir  = g_sigDir;
    bool want = (dir != 0);
+   if(want && g_inNews)
+      want = false;                       // P3: no new trade 1 in the news window; a waiting limit is deleted below
    if(want && !SpreadOk())
      {
       want = false;                       // P2: market mode waits; the limit is deleted until the next bar
@@ -1279,6 +1351,7 @@ void ResetState()
    g_pullSell     = false;
    g_marginState  = 0;
    g_marginLow    = false;
+   g_inNews       = false;
    g_sumBaskets   = 0;
    g_sumHV        = 0;
    g_sumBT2       = 0;
@@ -1340,6 +1413,15 @@ bool InputsOk()
       err = "InpRsiPeriod must be at least 1, and InpRsiMax above 50 and at most 100";
    if(err == "" && InpMaxSpread < 0.0)
       err = "InpMaxSpread must be 0 or more";
+   if(err == "" && InpNewsFilter)
+     {
+      g_newsStart = MinutesOf(InpNewsStart);
+      g_newsEnd   = MinutesOf(InpNewsEnd);
+      if(g_newsStart < 0 || g_newsEnd < 0)
+         err = "InpNewsStart and InpNewsEnd must be server times like 15:00 (HH:MM)";
+      else if(g_newsEnd <= g_newsStart)
+         err = "InpNewsEnd must be later than InpNewsStart on the same day";
+     }
    if(err == "" && InpMagic <= 0)
       err = "InpMagic must be above 0";
    if(err == "")
@@ -1399,9 +1481,10 @@ int OnInit()
    string hedge = (InpMaxTrades >= 2 ? StringFormat("hedge %s lots when gold is %.2f $ against trade 1", LotsText(g_lotHedge), InpHedgeDistance) : "no hedge");
    string t3    = (InpMaxTrades >= 3 ? StringFormat("trade 3 %s lots back at trade 1's price", LotsText(g_lotT3)) : "no trade 3");
    string spr   = (InpMaxSpread > 0.0 ? StringFormat("%.2f $", InpMaxSpread) : "off");
-   V14Log(StringFormat("build %s on %s | trade 1 %s lots, %s | trend %s EMA %d/%d, %s | harvest %s | %s | %s | basket target %s | hard stop %s | max spread %s | magic %I64d%s",
+   string news  = (InpNewsFilter ? StringFormat("no new trade 1 %s-%s server time, Mon-Fri", ClockText(g_newsStart), ClockText(g_newsEnd)) : "off");
+   V14Log(StringFormat("build %s on %s | trade 1 %s lots, %s | trend %s EMA %d/%d, %s | harvest %s | %s | %s | basket target %s | hard stop %s | max spread %s | news filter %s | magic %I64d%s",
                        V14_BUILD, _Symbol, LotsText(InpLots), entry, EnumToString(InpTrendTF), InpEmaFast, InpEmaSlow, adx,
-                       Amount(InpHarvestNet), hedge, t3, Money(InpBasketTarget), Money(-InpHardStop), spr, InpMagic,
+                       Amount(InpHarvestNet), hedge, t3, Money(InpBasketTarget), Money(-InpHardStop), spr, news, InpMagic,
                        (g_isTester ? " | Strategy Tester" : "")));
    return INIT_SUCCEEDED;
   }
@@ -1439,6 +1522,8 @@ void OnTick()
       g_expectRole = 0;
       g_expectDir  = 0;
      }
+   //--- P3: is the news window on? (used in step 8)
+   UpdateNewsWindow();
    //--- 1. update the trades and the limit order
    Sync();
    SyncLimit();
