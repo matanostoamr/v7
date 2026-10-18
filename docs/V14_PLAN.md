@@ -1,6 +1,6 @@
-# v14 Hedge Harvester: plan rev 1 (waiting for your OK)
+# v14 Hedge Harvester: plan rev 2 (approved, build 1.0 written)
 
-**Status:** spec only, no code yet. v13 stays as it is (PR #5, stopped).
+**Status:** you said OK to the defaults + P1 + P2. Build 1.0 is written: `Gold_Hedge_Harvester_v14.00.mq5` (notes in section 12). v13 stays as it is (PR #5, stopped).
 **New bot:** `Gold_Hedge_Harvester_v14.00.mq5`, magic `140001`, on its own branch `feat/v14-hedge-harvester`.
 **Numbers in this plan:**
 - gold at $4,000; 0.01 lot = $1 per $1 move ≈ £0.75 (GBP/USD 1.33);
@@ -82,14 +82,16 @@ After a basket closes, the next one needs a fresh signal on a new M5 bar. While 
 With max trades 2 there is no trade 3. After the hedge, the basket closes at 3981.79 (+£1) or at 4023.02 (−£30).
 
 ## 5. Margin (UK 1:20 = 5%: about £160 per 0.01 lot at $4,200)
-| Open trades | Lots | If the broker counts both sides | If it counts only the bigger side |
-|---|---|---:|---:|
-| 1 | 0.01 | £160 | £160 |
-| 2 (with the hedge) | 0.01 + 0.02 | £480 | £320 |
-| 3 | 0.01 + 0.02 + 0.03 | £960 | £640 |
+MT5 charges the uncovered volume at the normal rate, and the covered (hedged) volume **once**, at the broker's hedged rate (0–100% of normal). Some brokers charge only the bigger side.
 
-- I don't know yet how Pepperstone counts hedged gold trades. Build 1.0 reads the broker's own hedge rule and prints the real margin for 1, 2 and 3 trades in the journal at the start.
-- With £1,000, 2 trades fit either way. 3 trades need about **£2,000** if the broker counts both sides. That's why the default is max trades 2.
+| Open trades | Lots | Margin |
+|---|---|---:|
+| 1 | 0.01 | £160 |
+| 2 (with the hedge) | 0.01 + 0.02 | £160 – £320 |
+| 3 | 0.01 + 0.02 + 0.03 | £320 – £640 |
+
+- Build 1.0 reads the broker's hedge rule and prints the margin for 1, 2 and 3 trades in the journal on the first tick.
+- With P1 (× 1.5), max 2 trades needs up to £480 free margin, so it fits £1,000 easily. Max 3 needs up to £960, so on £1,000 a basket starts only while almost all the money is free. **Use £1,500 or more to test max 3.**
 
 ## 6. Improvements I suggest (each needs your OK, otherwise it is not built)
 **P1. Margin safety (recommended)**
@@ -121,17 +123,19 @@ With max trades 2 there is no trade 3. After the hedge, the basket closes at 398
 6. **Lots:** [0.01 / 0.02 / 0.03].
 7. **Improvements:** [P1 + P2], plus P3 and/or P4 if you want them.
 
-## 8. The complete list of inputs
-- `InpLots` 0.01: trade 1. The hedge is 2× and trade 3 is 3× this lot.
-- `InpMaxTrades` 2 (1–3)
-- `InpHedgeDist` 8.00 ($)
-- `InpHarvestNet` 4.00 (£)
-- `InpBasketNet` 1.00 (£)
+## 8. The complete list of inputs (build 1.0)
+- `InpLots` 0.01: trade 1
+- `InpMaxTrades` 2 (1 = no hedge, 2 = + hedge, 3 = + trade 3)
+- `InpHarvestNet` 4.00 (£): trade 1 alone closes at this net
+- `InpHedgeDistance` 8.00 ($): the hedge opens when gold is this far against trade 1
+- `InpHedgeMult` 2.0: hedge lot = InpLots × 2.0 = 0.02
+- `InpTrade3Mult` 3.0: trade 3 lot = InpLots × 3.0 = 0.03
+- `InpBasketTarget` 1.00 (£): after the hedge, all trades close together at this net
 - `InpHardStop` 30.00 (£)
 - `InpEntryMode` 1 (1 = limit, 2 = market)
-- `InpTrendTF` M15, `InpEmaFast` 20, `InpEmaSlow` 50, `InpAdxPeriod` 14, `InpAdxMin` 20
-- `InpPullEma` 20 (M5), `InpRsiPeriod` 14, `InpRsiMax` 70 (sells use 100 − 70 = 30)
-- Only if approved: `InpMaxSpread` 1.00 $ (P2); `InpNewsFrom` 15:00, `InpNewsTo` 15:45, `InpFridayStop` 21:00 (P3); `InpDayLoss` 60.00 £ (P4)
+- `InpTrendTF` M15, `InpEmaFast` 20, `InpEmaSlow` 50, `InpAdxPeriod` 14, `InpAdxMin` **15** (0 = off)
+- `InpEntryTF` M5, `InpPullEma` 20, `InpRsiPeriod` 14, `InpRsiMax` 70 (sells use 100 − 70 = 30; 100 = off)
+- `InpMaxSpread` 1.00 $ (P2; 0 = off)
 - `InpMagic` 140001
 
 ## 9. Necessary basics (no effect on trading decisions)
@@ -160,7 +164,7 @@ With max trades 2 there is no trade 3. After the hedge, the basket closes at 398
 
 ## 10. Tests after the build
 1. **Step 1, one test:** August, 2026.08.01 → 2026.09.01 (the tester stops at the start of the end date). Use XAUUSD M5, every tick based on real ticks, £1,000, 1:30 and the default inputs. Attach the HTML report, or paste it. I'll check the rules trade by trade, the margin numbers and the trade 1 harvest rate.
-2. **Step 2, optimizer on August only:** `InpMaxTrades` 1 → 3, `InpHedgeDist` 6 → 14 step 2, `InpEntryMode` 1 → 2. That's 30 passes with "Slow complete algorithm". Paste the XML. Use £2,000 if step 1 shows that 3 trades need more than about £650 margin.
+2. **Step 2, optimizer on August only:** `InpMaxTrades` 1 → 3, `InpHedgeDistance` 6 → 14 step 2, `InpEntryMode` 1 → 2. That's 30 passes with "Slow complete algorithm". Paste the XML. Use £2,000 if step 1 shows that 3 trades need more than about £650 margin.
 3. **Step 3, check on new months:** take the best August setting, unchanged, and run it on July (07.01 → 08.01), September (09.01 → 10.01) and October (10.01 → 10.15). v14 passes only if it makes money in all three and the biggest drop stays below £250.
 
 Choosing on one month and checking on others avoids the luck problem we saw in v13, where the best InpTurn was different in every month.
@@ -169,3 +173,20 @@ Choosing on one month and checking on others avoids the luck problem we saw in v
 - Distances that follow the market's speed (ATR) instead of fixed $. v13's best InpTurn was different in every month.
 - Broker-side safety stops, so the hard stop also works when MT5 is off. This is needed before a live account.
 - More news times, for example 21:00 for US rate decisions.
+
+## 12. Build 1.0 notes
+- **Built:** the defaults + P1 + P2. P3 (quiet times) and P4 (daily loss limit) are not built.
+- **Input names as you asked:** `InpHarvestNet`, `InpHedgeDistance`, `InpBasketTarget`. The hedge and trade 3 sizes are inputs too (`InpHedgeMult`, `InpTrade3Mult`), and so is the entry timeframe (`InpEntryTF`).
+- **More active, as you asked:**
+  - `InpAdxMin` default is 15 instead of 20. Set 20 for the plan's value, or 0 to switch the flat-market pause off.
+  - `InpRsiMax` 100 switches the RSI limit off; `InpMaxSpread` 0 switches P2 off.
+  - `InpTrendTF` M5 makes the trend change faster.
+  - The EMA trend always gives a side, so the bot is never waiting for a big move. The longest quiet time comes from a hedged basket: while it waits for +£1 or the hard stop, no new basket starts (your 1–3 trades rule).
+- **P2 with a limit order:** when the spread goes above $1, the waiting limit is deleted and placed again on the next M5 bar. In mode 2 the bot waits until the spread is back to normal.
+- **Two more closing comments:** `V14 HF` (P1: the hedge or trade 3 failed 3 times, so all trades closed) and `V14 RS` (restart: open trades that don't form a basket).
+- **Journal:**
+  - the settings at the start;
+  - the broker's hedge rule and the margin for 1, 2 and 3 trades on the first tick;
+  - one `BASKET #n` line per basket: how it ended, the result, trades used, start and end time;
+  - a `SUMMARY` line at the end: baskets, % harvested by trade 1 alone, recoveries with the hedge and with trade 3, hard stops, total, average.
+- **Checked here:** a syntax and type check with my offline checker (0 errors, 0 warnings). That is not MetaEditor, so please compile it. No backtest was run, as you asked.
