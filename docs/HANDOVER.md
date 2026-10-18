@@ -207,9 +207,19 @@ Its results:
 **Test B (frequency), optimizer on August:**
 - Period 2026.08.01 → 2026.09.01, build 1.1.1 defaults, "Slow complete algorithm".
 - `InpEntryMode` 1 → 2, `InpPullEma` 10 → 20 step 5, `InpAdxMin` 0 → 20 step 5. That's 30 passes; he pastes the XML.
-- **The pick:** the setting with the most trades that still makes money, with the biggest drop under £250.
+- **Result (PR #6 comment 6253298119):** 27 of 30 passes lost. Defaults (mode 1, PullEma 20, ADX 15) −£152.37, drop 21.84%. Only mode 2 + PullEma 10 made money: +£8.17 with ADX 0/5/10 (all three the same), 222 trades. **The pick: mode 2, PullEma 10, ADX 10.**
 
-**Test C:** the Test B pick, unchanged, on July (07.01 → 08.01) and on Sep 1 → Oct 15. It becomes the default only if it makes money in both and the drop stays under £250.
+**Test C (the pick, build 1.1.1, one run per month):**
+
+| Run | Period | Net | Equity drop | Baskets | HS | Same month, defaults |
+|---|---|---|---|---|---|---|
+| 1414-41 | Aug 1–31 | +£8.17 | £101.67 | 160 | 15 | −£152.37 |
+| 1414-42 | Sep 1–30 | +£24.26 | £157.69 | 167 | 15 | +£45.57 (drop £201.71) |
+| 1414-43 | Oct 1–18 | +£145.72 | £55.99 | 86 | 4 | +£212.80 (Oct 1–17) |
+
+- 0 rule problems in all three; every trade 1 at market; 0 starts in 15:00–15:45.
+- Passes the pass rule in Aug, Sep, Oct. Sum +£178.15 vs defaults +£106.00. Edge is thin in Aug/Sep (PF 1.01 / 1.02).
+- **July (C2, 07.01 → 08.01) is still not run.** Build 1.2 defaults only after July passes and he says OK.
 
 **Build 1.2:** the new defaults from B and C, **only after his OK.** He said "let's enable that" if more trades come without excessive risk, but he was told "With your OK it becomes the new default in build 1.2". So show the pick and ask for OK.
 
