@@ -1,5 +1,7 @@
 # HANDOVER: read this first (state on 2026-10-18)
 
+> **2026-10-19: newer bot v15 is on `feat/v15-dual-grid-scalper` (PR #7).** The up-to-date handover is there: https://raw.githubusercontent.com/matanostoamr/v7/feat/v15-dual-grid-scalper/docs/HANDOVER.md (it also keeps the v14 forward-test rules below).
+
 This file lets a new chat continue the work exactly where the old one stopped. It covers the user, the rules, the repo, the current bot (v14 build 1.1.1), all test evidence, the decisions and what happens next.
 
 - **Branch:** `feat/v14-hedge-harvester` (PR #6). `main` has only v7.
